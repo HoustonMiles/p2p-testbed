@@ -1,0 +1,196 @@
+# =============================================================================
+# P2P testbed topology
+#
+#   [peer-a]--lan_a--[nat-a]--+--------------- wan ---------------+--[nat-b]--lan_b--[peer-b]
+#                             |                                   |
+#                             +--carrier_a--[cgn-a]--wan  wan--[cgn-b]--carrier_b--+
+#
+#   wan (203.0.113.0/24) is the simulated public internet. WAN services
+#   (probe now; STUN, rendezvous, coturn, attacker later) live there.
+#
+# Each home NAT is wired to BOTH the wan and its carrier network. The UPSTREAM
+# setting picks which one it uses and switches the other interface off:
+#   UPSTREAM=wan   -> the home router has a public IP (normal home internet)
+#   UPSTREAM=cgnat -> the home router sits behind the ISP's CGN (two NAT layers)
+#
+# Pick a configuration with environment variables (see .env.example), e.g.
+#   NAT_A_TYPE=symmetric NET_PROFILE=coast docker compose up -d --build --wait
+# =============================================================================
+
+# --- Shared settings (YAML anchors, merged into services below) ---
+x-router: &router
+  build: ./router
+  image: p2p-testbed/router
+  init: true                      # tini as PID 1, so containers stop instantly
+  cap_add: [NET_ADMIN]            # needed for iptables, routes and tc
+  sysctls:
+    net.ipv4.ip_forward: 1        # act as a router
+    net.ipv4.conf.all.rp_filter: 0      # don't drop packets on "unexpected" interfaces
+    net.ipv4.conf.default.rp_filter: 0
+    # How long an idle UDP mapping (pinhole) stays open. Real routers vary
+    # (roughly 30-180 s); this matters for when old hop ports close.
+    net.netfilter.nf_conntrack_udp_timeout: ${UDP_TIMEOUT:-30}
+    net.netfilter.nf_conntrack_udp_timeout_stream: ${UDP_TIMEOUT_STREAM:-120}
+  healthcheck:                    # healthy once configure-router.sh finishes
+    test: ["CMD", "test", "-f", "/tmp/ready"]
+    interval: 1s
+    retries: 30
+
+x-host: &host
+  build: ./host
+  image: p2p-testbed/host
+  init: true
+  cap_add: [NET_ADMIN]            # needed to replace the default route
+  healthcheck:
+    test: ["CMD", "test", "-f", "/tmp/ready"]
+    interval: 1s
+    retries: 30
+
+services:
+  # ---------------------------------------------------------------------------
+  # Side A
+  # ---------------------------------------------------------------------------
+  peer-a:
+    <<: *host
+    environment:
+      GATEWAY: 192.168.10.2                   # nat-a's LAN address
+    networks:
+      lan_a: { ipv4_address: 192.168.10.10 }
+    depends_on:
+      nat-a: { condition: service_healthy }
+
+  nat-a:
+    <<: *router
+    environment:
+      ROLE: home
+      NAT_TYPE: ${NAT_A_TYPE:-port_restricted}
+      UPSTREAM: ${NAT_A_UPSTREAM:-wan}
+      LAN_IP: 192.168.10.2
+      LAN_SUBNET: 192.168.10.0/24
+      INSIDE_HOST: 192.168.10.10              # peer-a
+      WAN_IP: 203.0.113.10                    # public IP when UPSTREAM=wan
+      CARRIER_IP: 100.64.1.10                 # carrier IP when UPSTREAM=cgnat
+      CGN_IP: 100.64.1.2                      # cgn-a, next hop when UPSTREAM=cgnat
+      NET_PROFILE: ${NET_PROFILE:-local}
+      UPLINK_MBIT: ${UPLINK_MBIT:-}
+      DOWNLINK_MBIT: ${DOWNLINK_MBIT:-}
+      DEBUG: ${DEBUG:-0}
+    networks:
+      lan_a:     { ipv4_address: 192.168.10.2 }
+      carrier_a: { ipv4_address: 100.64.1.10 }
+      wan:       { ipv4_address: 203.0.113.10 }
+    depends_on:
+      cgn-a: { condition: service_healthy }
+
+  cgn-a:
+    <<: *router
+    environment:
+      ROLE: cgn
+      NAT_TYPE: ${CGN_A_TYPE:-port_restricted}
+      INSIDE_IP: 100.64.1.2
+      INSIDE_SUBNET: 100.64.1.0/24
+      INSIDE_HOST: 100.64.1.10                # nat-a's carrier address
+      OUTSIDE_IP: 203.0.113.11                # side A's public IP when behind CGNAT
+      DEBUG: ${DEBUG:-0}
+    networks:
+      carrier_a: { ipv4_address: 100.64.1.2 }
+      wan:       { ipv4_address: 203.0.113.11 }
+
+  # ---------------------------------------------------------------------------
+  # Side B (mirror of side A)
+  # ---------------------------------------------------------------------------
+  peer-b:
+    <<: *host
+    environment:
+      GATEWAY: 192.168.20.2
+    networks:
+      lan_b: { ipv4_address: 192.168.20.10 }
+    depends_on:
+      nat-b: { condition: service_healthy }
+
+  nat-b:
+    <<: *router
+    environment:
+      ROLE: home
+      NAT_TYPE: ${NAT_B_TYPE:-port_restricted}
+      UPSTREAM: ${NAT_B_UPSTREAM:-wan}
+      LAN_IP: 192.168.20.2
+      LAN_SUBNET: 192.168.20.0/24
+      INSIDE_HOST: 192.168.20.10
+      WAN_IP: 203.0.113.20
+      CARRIER_IP: 100.64.2.10
+      CGN_IP: 100.64.2.2
+      NET_PROFILE: ${NET_PROFILE:-local}
+      UPLINK_MBIT: ${UPLINK_MBIT:-}
+      DOWNLINK_MBIT: ${DOWNLINK_MBIT:-}
+      DEBUG: ${DEBUG:-0}
+    networks:
+      lan_b:     { ipv4_address: 192.168.20.2 }
+      carrier_b: { ipv4_address: 100.64.2.10 }
+      wan:       { ipv4_address: 203.0.113.20 }
+    depends_on:
+      cgn-b: { condition: service_healthy }
+
+  cgn-b:
+    <<: *router
+    environment:
+      ROLE: cgn
+      NAT_TYPE: ${CGN_B_TYPE:-port_restricted}
+      INSIDE_IP: 100.64.2.2
+      INSIDE_SUBNET: 100.64.2.0/24
+      INSIDE_HOST: 100.64.2.10
+      OUTSIDE_IP: 203.0.113.21
+      DEBUG: ${DEBUG:-0}
+    networks:
+      carrier_b: { ipv4_address: 100.64.2.2 }
+      wan:       { ipv4_address: 203.0.113.21 }
+
+  # ---------------------------------------------------------------------------
+  # WAN services
+  # ---------------------------------------------------------------------------
+  # probe: a tiny "what is my public address?" server. Any UDP packet sent to
+  # port 9000 gets back the sender's address as seen from the internet, as
+  # "IP PORT", e.g. "203.0.113.10 40000". (A space, not a colon, because socat
+  # treats ':' as a separator.) It is a stand-in until the real STUN server.
+  probe:
+    <<: *host
+    networks:
+      wan: { ipv4_address: 203.0.113.100 }
+    # $$ stops compose from expanding the variables; socat sets them per packet.
+    command: ["socat", "UDP4-RECVFROM:9000,fork", "SYSTEM:echo $$SOCAT_PEERADDR $$SOCAT_PEERPORT"]
+
+  # Reserved WAN addresses for later steps:
+  #   203.0.113.100  STUN (replaces probe)
+  #   203.0.113.101  rendezvous server
+  #   203.0.113.102  coturn relay
+  #   203.0.113.200+ attacker containers
+
+# =============================================================================
+# Networks. Fixed subnets so every address above is predictable.
+#
+# gateway_mode_ipv4 = nat-unprotected: since Docker 28, the host drops any
+# packet addressed to a container's IP that arrives from a different Docker
+# network. Our routers do exactly that on purpose (peer-a -> nat-a -> probe),
+# so we turn that protection off for these networks. Isolation is enforced
+# by our own NAT routers instead. Docker versions before 28 never had the
+# protection and don't need this option.
+# =============================================================================
+x-net-opts: &net_opts
+  com.docker.network.bridge.gateway_mode_ipv4: nat-unprotected
+
+networks:
+  lan_a:
+    driver_opts: *net_opts
+    ipam: { config: [ { subnet: 192.168.10.0/24, gateway: 192.168.10.1 } ] }
+  lan_b:
+    driver_opts: *net_opts
+    ipam: { config: [ { subnet: 192.168.20.0/24, gateway: 192.168.20.1 } ] }
+  carrier_a:                                 # RFC 6598 carrier-grade NAT space
+    driver_opts: *net_opts
+    ipam: { config: [ { subnet: 100.64.1.0/24, gateway: 100.64.1.1 } ] }
+  carrier_b:
+    driver_opts: *net_opts
+    ipam: { config: [ { subnet: 100.64.2.0/24, gateway: 100.64.2.1 } ] }
+  wan:                                       # the "public internet" (TEST-NET-3)
+    driver_opts: *net_opts
+    ipam: { config: [ { subnet: 203.0.113.0/24, gateway: 203.0.113.1 } ] }
