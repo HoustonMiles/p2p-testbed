@@ -8,11 +8,14 @@
 set -euo pipefail
 
 modules=(
-  sch_netem    # tc netem: latency, jitter, loss and rate limiting
-  ifb          # IFB devices: lets us rate-limit INCOMING traffic (downlink cap)
-  xt_recent    # iptables "recent" match: used by the restricted-cone NAT type
-  nf_conntrack # connection tracking: the heart of Linux NAT
-  nf_nat       # NAT itself
+  sch_netem            # tc netem: latency, jitter, loss and rate limiting
+  ifb                  # IFB devices: lets us rate-limit INCOMING traffic (downlink cap)
+  ip_set               # ipset: in-kernel tables of addresses/ports...
+  ip_set_bitmap_port   # ...per-port table (full cone NAT type)
+  ip_set_hash_ipport   # ...per (IP, port) table (restricted cone NAT type)
+  xt_set               # lets iptables read/write those tables
+  nf_conntrack         # connection tracking: the heart of Linux NAT
+  nf_nat               # NAT itself
 )
 
 for m in "${modules[@]}"; do

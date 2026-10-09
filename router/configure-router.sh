@@ -50,8 +50,6 @@ ensure_chain() {
 ROLE="${ROLE:?ROLE must be 'home' or 'cgn'}"
 NAT_TYPE="${NAT_TYPE:-port_restricted}"
 INSIDE_HOST="${INSIDE_HOST:?INSIDE_HOST (the single host behind this NAT) is required}"
-# UDP port range that a full/restricted cone NAT will forward to INSIDE_HOST.
-PINHOLE_PORTS="${PINHOLE_PORTS:-1024:65535}"
 
 case "$ROLE" in
   home)
@@ -109,8 +107,8 @@ fi
 #
 #   Type             Mapping (outbound)            Filtering (inbound)
 #   ---------------  ----------------------------  ---------------------------
-#   full_cone        endpoint-independent          anyone may send in
-#   restricted       endpoint-independent          only IPs we have contacted
+#   full_cone        endpoint-independent          anyone, on ports in use
+#   restricted       endpoint-independent          IPs contacted from that port
 #   port_restricted  endpoint-independent          only exact IP:port contacted
 #   symmetric        new random port per dest.     only exact IP:port contacted
 #
@@ -136,22 +134,45 @@ else
 fi
 
 # --- Inbound filtering (beyond what conntrack already allows) ---
+#
+# The two cone types are emulated with ipset tables that remember outbound
+# activity PER MAPPING, i.e. per internal UDP port, like a real NAT does:
+#   full_cone : which internal ports currently have a mapping
+#   restricted: which (remote IP, internal port) pairs have been contacted
+# Entries expire after the conntrack UDP "stream" timeout, so a cone pinhole
+# closes at the same time as the underlying mapping would. Every outbound
+# packet refreshes the entry (--exist).
+SET_TIMEOUT="$(cat /proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream 2>/dev/null || echo 120)"
+
 case "$NAT_TYPE" in
   full_cone)
-    # Linux has no native full cone mode, so we emulate it: any unsolicited
-    # UDP arriving on the outside is forwarded to the inside host.
-    iptables -t nat -A TB_PRE -i "$OUT_IF" -p udp --dport "$PINHOLE_PORTS" \
+    # Endpoint-independent filtering: once the inside host has sent from
+    # port P, ANYONE may send to external port P. Ports with no mapping stay
+    # closed, so a scanning attacker only finds ports actually in use.
+    ipset create tb_mapped bitmap:port range 0-65535 timeout "$SET_TIMEOUT" -exist \
+      || die "ipset unavailable; run scripts/host_setup.sh on the host"
+    ipset flush tb_mapped
+    # Outbound: remember our internal source port.
+    iptables -t mangle -A TB_MPOST -o "$OUT_IF" -s "$IN_SUBNET" -p udp \
+      -j SET --add-set tb_mapped src --exist --timeout "$SET_TIMEOUT"
+    # Inbound: forward to the inside host if that port has a mapping.
+    # (Ports are preserved, so external port == internal port.)
+    iptables -t nat -A TB_PRE -i "$OUT_IF" -p udp \
+      -m set --match-set tb_mapped dst \
       -j DNAT --to-destination "$INSIDE_HOST"
     ;;
   restricted)
-    # Address-restricted cone: remember every destination IP the inside host
-    # sends to (xt_recent list "tb_contacted"), then accept inbound UDP from
-    # those IPs on any source port. Needs the xt_recent kernel module.
-    iptables -t mangle -A TB_MPOST -o "$OUT_IF" -s "$IN_SUBNET" \
-      -m recent --name tb_contacted --rdest --set \
-      || die "xt_recent unavailable; run scripts/host_setup.sh on the host"
-    iptables -t nat -A TB_PRE -i "$OUT_IF" -p udp --dport "$PINHOLE_PORTS" \
-      -m recent --name tb_contacted --rcheck --rsource \
+    # Address-dependent filtering: inbound to port P is allowed from any port
+    # of an IP that the inside host has contacted FROM PORT P.
+    ipset create tb_contacted hash:ip,port timeout "$SET_TIMEOUT" -exist \
+      || die "ipset unavailable; run scripts/host_setup.sh on the host"
+    ipset flush tb_contacted
+    # Outbound: remember (destination IP, our internal source port).
+    iptables -t mangle -A TB_MPOST -o "$OUT_IF" -s "$IN_SUBNET" -p udp \
+      -j SET --add-set tb_contacted dst,src --exist --timeout "$SET_TIMEOUT"
+    # Inbound: forward if (sender IP, destination port) was remembered.
+    iptables -t nat -A TB_PRE -i "$OUT_IF" -p udp \
+      -m set --match-set tb_contacted src,dst \
       -j DNAT --to-destination "$INSIDE_HOST"
     ;;
   port_restricted|symmetric)

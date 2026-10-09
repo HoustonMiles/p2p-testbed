@@ -7,10 +7,11 @@ FROM alpine:3.20
 
 # iproute2 / iproute2-tc : interfaces, routes, and tc/netem link emulation
 # iptables               : NAT rules (Alpine uses the nf_tables backend)
+# ipset                  : per-mapping tables used by the full/restricted cone types
 # conntrack-tools        : `conntrack -L` to inspect NAT mappings when debugging
 # tcpdump                : packet capture when debugging
 # bash                   : the configuration script uses bash features
-RUN apk add --no-cache bash iproute2 iproute2-tc iptables conntrack-tools tcpdump
+RUN apk add --no-cache bash iproute2 iproute2-tc iptables ipset conntrack-tools tcpdump
 
 COPY configure-router.sh /usr/local/bin/configure-router.sh
 RUN chmod +x /usr/local/bin/configure-router.sh

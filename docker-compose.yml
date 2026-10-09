@@ -6,7 +6,7 @@
 #                             +--carrier_a--[cgn-a]--wan  wan--[cgn-b]--carrier_b--+
 #
 #   wan (203.0.113.0/24) is the simulated public internet. WAN services
-#   (probe now; STUN, rendezvous, coturn, attacker later) live there.
+#   (STUN now; rendezvous, coturn relay, attackers later) live there.
 #
 # Each home NAT is wired to BOTH the wan and its carrier network. The UPSTREAM
 # setting picks which one it uses and switches the other interface off:
@@ -148,21 +148,29 @@ services:
   # ---------------------------------------------------------------------------
   # WAN services
   # ---------------------------------------------------------------------------
-  # probe: a tiny "what is my public address?" server. Any UDP packet sent to
-  # port 9000 gets back the sender's address as seen from the internet, as
-  # "IP PORT", e.g. "203.0.113.10 40000". (A space, not a colon, because socat
-  # treats ':' as a separator.) It is a stand-in until the real STUN server.
-  probe:
-    <<: *host
+  # stun: coturn in STUN-only mode. Answers "what is my public address?" on
+  # UDP 3478 and supports the RFC 5780 NAT behaviour tests, which need a
+  # second IP (203.0.113.103, added by start-stun.sh) and a second port (3479).
+  stun:
+    build: ./stun
+    image: p2p-testbed/stun
+    init: true
+    cap_add: [NET_ADMIN]            # needed to add the second IP address
+    environment:
+      PRIMARY_IP: 203.0.113.100
+      ALT_IP: 203.0.113.103
     networks:
       wan: { ipv4_address: 203.0.113.100 }
-    # $$ stops compose from expanding the variables; socat sets them per packet.
-    command: ["socat", "UDP4-RECVFROM:9000,fork", "SYSTEM:echo $$SOCAT_PEERADDR $$SOCAT_PEERPORT"]
+    healthcheck:                    # healthy once it answers a real STUN request
+      test: ["CMD", "timeout", "3", "turnutils_stunclient", "203.0.113.100"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
 
   # Reserved WAN addresses for later steps:
-  #   203.0.113.100  STUN (replaces probe)
   #   203.0.113.101  rendezvous server
   #   203.0.113.102  coturn relay
+  #   203.0.113.103  STUN alternate IP (not visible to Docker, so keep it free)
   #   203.0.113.200+ attacker containers
 
 # =============================================================================
@@ -170,7 +178,7 @@ services:
 #
 # gateway_mode_ipv4 = nat-unprotected: since Docker 28, the host drops any
 # packet addressed to a container's IP that arrives from a different Docker
-# network. Our routers do exactly that on purpose (peer-a -> nat-a -> probe),
+# network. Our routers do exactly that on purpose (peer-a -> nat-a -> stun),
 # so we turn that protection off for these networks. Isolation is enforced
 # by our own NAT routers instead. Docker versions before 28 never had the
 # protection and don't need this option.

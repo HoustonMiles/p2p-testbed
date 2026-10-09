@@ -13,14 +13,28 @@ simulated latency, jitter, loss and link capacity between them.
 ## Requirements
 
 - Linux with Docker Engine and the Compose plugin
-- Kernel modules: `sch_netem`, `ifb`, `xt_recent` (loaded by `scripts/host_setup.sh`)
+- Kernel modules: `sch_netem`, `ifb`, and the ipset modules (all loaded by `scripts/host_setup.sh`)
+- Host reverse-path filtering must be off or "loose". Docker sends traffic
+  between containers through the host firewall, and a strict check drops NAT
+  replies on the LAN bridges. On NixOS:
+
+  ```nix
+  virtualisation.docker.enable = true;
+  networking.firewall.checkReversePath = "loose";
+  boot.kernelModules = [ "sch_netem" "ifb" "ip_set" "ip_set_bitmap_port" "ip_set_hash_ipport" "xt_set" ];
+  ```
+
+  Tailscale also uses 100.64.0.0/10, the same range as the carrier networks.
+  Stop `tailscaled` during experiments if CGNAT runs misbehave.
 
 ## Quick start
 
 ```bash
 ./scripts/host_setup.sh                 # once per boot (uses sudo)
 docker compose up -d --build --wait     # build and start, waits until configured
-./scripts/smoke_test.sh                 # sanity check
+./scripts/smoke_test.sh                 # sanity check (seconds)
+./scripts/verify_nat.sh                 # RFC 5780 check of the running NAT types (~10 s)
+./scripts/verify_nat.sh --all           # check every NAT type and CGNAT (~1 min)
 docker compose down -t 1                # tear down
 ```
 
@@ -54,8 +68,8 @@ Containers must be recreated (`down` then `up`) for new settings to apply.
 | nat-a | LAN 192.168.10.2, WAN 203.0.113.10, carrier 100.64.1.10 |
 | nat-b | LAN 192.168.20.2, WAN 203.0.113.20, carrier 100.64.2.10 |
 | cgn-a / cgn-b | carrier 100.64.1.2 / 100.64.2.2, WAN 203.0.113.11 / 203.0.113.21 |
-| probe | 203.0.113.100 (UDP 9000 replies with your public "IP PORT") |
-| reserved | .101 rendezvous, .102 coturn, .200+ attackers |
+| stun | 203.0.113.100 and alternate 203.0.113.103, UDP/TCP 3478 and 3479 |
+| reserved | .101 rendezvous, .102 coturn relay, .200+ attackers |
 
 A side's public IP is its home router's WAN IP, or its CGN's WAN IP when
 `UPSTREAM=cgnat`.
@@ -64,13 +78,28 @@ A side's public IP is its home router's WAN IP, or its CGN's WAN IP when
 
 All NAT behaviour comes from the Linux kernel (netfilter/conntrack), the same
 code most real home routers run. See `router/configure-router.sh`.
+`scripts/verify_nat.sh` confirms each type with the RFC 5780 tests.
 
 | Type | Mapping | Inbound allowed from | How |
 |---|---|---|---|
-| `full_cone` | keeps port | anyone | MASQUERADE + DNAT of all UDP to the peer |
-| `restricted` | keeps port | any port of an IP the peer contacted | MASQUERADE + `xt_recent` list of contacted IPs |
+| `full_cone` | keeps port | anyone, but only on ports with an active mapping | MASQUERADE + ipset of mapped ports |
+| `restricted` | keeps port | any port of an IP contacted from that mapping | MASQUERADE + ipset of (remote IP, port) pairs |
 | `port_restricted` | keeps port | exact IP:port the peer contacted | plain MASQUERADE (Linux default) |
 | `symmetric` | random port per destination | exact IP:port the peer contacted | MASQUERADE `--random-fully` |
+
+## STUN server
+
+`stun` runs coturn in STUN-only mode on two IP addresses and two ports, which
+is what RFC 5780 NAT behaviour discovery needs. The peers include coturn's
+client tools:
+
+```bash
+docker compose exec peer-a timeout 3 turnutils_stunclient 203.0.113.100      # your public address
+docker compose exec peer-a turnutils_natdiscovery -m -f 203.0.113.100        # mapping + filtering tests
+```
+
+`turnutils_stunclient` keeps waiting for RFC 5780 replies that a filtering
+NAT correctly blocks, so give it a `timeout`.
 
 ## Design notes
 
@@ -92,5 +121,4 @@ code most real home routers run. See `router/configure-router.sh`.
 
 ## Coming next
 
-- Step 3: STUN server on the WAN and full NAT-type verification (RFC 5780).
 - Step 4: Python runner that loops over configurations and collects results.
