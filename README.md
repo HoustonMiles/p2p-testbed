@@ -10,6 +10,66 @@ simulated latency, jitter, loss and link capacity between them.
                           +--carrier_a--[cgn-a]--wan    wan--[cgn-b]--carrier_b--+
 ```
 
+## Project status
+
+Research question: can synchronized port-hopping on a Noise-encrypted direct
+P2P channel give DoS resilience comparable to a TURN relay, while keeping
+direct-path latency and throughput, against conventional and AI-driven
+attackers across NAT types?
+
+### Done
+
+| Part | State | Evidence |
+|---|---|---|
+| NAT routers: full cone, restricted, port-restricted, symmetric | done | `router/configure-router.sh` |
+| Carrier-grade NAT (optional, per side) | done | `cgn-a`, `cgn-b` |
+| Link emulation: latency, jitter, loss, uplink/downlink caps | done | netem + IFB on the home routers |
+| STUN server with RFC 5780 support | done | `stun/` (coturn, STUN-only) |
+| Smoke test and NAT verification scripts | done | `scripts/smoke_test.sh`, `scripts/verify_nat.sh` |
+| Experiment runner (matrix, state reset, resume, metadata) | done | `p2prunner/` |
+| Trial types `nat_verify`, `ping`, `command` | done | `p2prunner/trials.py` |
+| Analysis notebook | done | `analysis/results.ipynb` |
+| **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
+| **Result:** path baseline | 180/180 trials; RTT within 0.4 ms of target, jitter matches netem theory | `results/path_baseline/20261009-175144` |
+
+Path baseline (each peer to the STUN server, median of 30 trials):
+
+| Profile | Expected RTT | Measured | Jitter (stdev) |
+|---|---|---|---|
+| local | 5 ms | 5.19 to 5.22 ms | 0.06 ms |
+| coast | 35 ms | 35.08 to 35.39 ms | 4.02 to 4.13 ms |
+| transatlantic | 75 ms | 74.80 to 75.18 ms | 6.23 to 6.42 ms |
+
+The realistic and hardest pairings measure the same, so the NAT type itself
+adds no measurable delay. The constant ~0.2 ms above target is container and
+NAT processing overhead (the testbed's noise floor).
+
+### Not done
+
+| Part | What it is for |
+|---|---|
+| **Raw UDP hole-punching baseline (not built)** | A plain UDP tool on the peers (STUN, hole punching, peer-to-peer RTT, throughput) with no Noise or port-hopping. It would give the per-pairing hole-punching success matrix, the peer-to-peer RTT baseline and a check of the bandwidth caps. Until it exists, those baselines come from the Go client, or from an established ICE library such as pion/ice, run through the `command` trial type. |
+| Direct channel (Go): hole punching + Noise handshake | The direct path under test |
+| Relay baseline: coturn as a TURN relay in the testbed (203.0.113.102) | The comparison baseline |
+| Port-hopping on the direct channel | The project's novelty |
+| Handoff Manager | Falls back to the relay when hopping can't hold |
+| Attack harness: flood containers and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |
+| Experiments A/B/C | A: traversal and hop success. B: performance cost. C: attack resilience |
+| Clock offset/drift flags in the client | Tests the time-based hop schedule against unsynchronized clocks |
+
+### Paper updates pending
+
+- Methodology: describe the testbed as built (CGNAT, RFC 4787 names for the
+  NAT types, half the RTT per direction, downlink cap before the NAT, RFC 5780
+  verification run without packet loss).
+- Define jitter: the profiles' ±7 / ±11 ms per-direction ranges, or the
+  measured standard deviation.
+- Report the NAT matrix and path baseline results.
+- Threats to validity: shared kernel and CPU; host firewall settings needed
+  to reproduce (see Requirements).
+- Find and verify a citation on AI-driven attacks against moving-target
+  defenses.
+
 ## Requirements
 
 - Linux with Docker Engine and the Compose plugin
@@ -148,8 +208,8 @@ bundle several settings under one name. Matrix keys: `nat_a`, `nat_b`,
 
 | Experiment | What it measures |
 |---|---|
-| `nat_matrix` | RFC 5780 check of all 16 NAT pairings, with and without CGNAT (~26 min) |
-| `path_baseline` | Access-path RTT, realistic and hardest pairings, 3 distances (~45 min) |
+| `nat_matrix` | RFC 5780 check of all 16 NAT pairings, with and without CGNAT (~15 min) |
+| `path_baseline` | Access-path RTT, realistic and hardest pairings, 3 distances (~35 min) |
 | `example_command` | Template for running your own programs on the peers |
 
 **Trial types:** `nat_verify` (RFC 5780 check), `ping` (RTT from both peers to
@@ -186,11 +246,10 @@ The notebook loads the newest run of each experiment: the NAT verification
 table, the path-baseline summary and RTT chart, and the columns of any
 `command` experiment.
 
-On NixOS, if importing pandas fails with a missing `libstdc++` or `libz`, add
-`programs.nix-ld.enable = true;` to `configuration.nix` and rebuild. Python
-wheels from PyPI expect those libraries in standard places.
+On NixOS, Python packages from PyPI look for `libstdc++` and other system
+libraries in standard Linux locations. Add `programs.nix-ld.enable = true;` to
+`configuration.nix`, rebuild, start a new login shell, and launch with:
 
-## Coming next
-
-- Go client: direct channel (hole punching + Noise), then the relay baseline
-  and port-hopping, run through the `command` trial type.
+```bash
+LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH uv run --group analysis jupyter lab analysis/results.ipynb
+```
