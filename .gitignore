@@ -1,0 +1,13 @@
+# Python environment created by uv
+.venv/
+__pycache__/
+
+# Experiment output. Large and machine-specific; back it up separately,
+# or remove this line if you want results in git.
+results/
+
+# Local settings copied from .env.example
+.env
+
+# Jupyter autosaves
+.ipynb_checkpoints/

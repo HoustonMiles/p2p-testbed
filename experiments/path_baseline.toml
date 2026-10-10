@@ -1,0 +1,47 @@
+# =============================================================================
+# Path baseline: what does each network setup cost before any of our code?
+#
+# Each peer pings the STUN server through its NAT(s) and latency shaping.
+# This is the control measurement for later experiments: latency added by
+# Noise, port-hopping or the relay is measured relative to these numbers.
+# It also checks the shaping: the expected RTT to a WAN host is HALF the
+# profile's peer-to-peer RTT (local 5 ms, coast 35 ms, transatlantic 75 ms),
+# since each home router delays only its own outgoing traffic.
+#
+# Two pairings:
+#   realistic  port-restricted cone on both sides: the most common home setup
+#   hardest    symmetric NAT on side A; side B behind a symmetric CGNAT.
+#              No direct hole punching works here, so it is the case that
+#              must fall back to the relay.
+#
+#   uv run python -m p2prunner plan experiments/path_baseline.toml
+#   uv run python -m p2prunner run  experiments/path_baseline.toml
+# =============================================================================
+
+name = "path_baseline"
+description = "Access-path RTT through NAT + shaping, realistic and hardest pairings, 3 distances."
+trial = "ping"
+runs = 30
+block_size = 10
+seed = 1
+verify_nat = true    # RFC 5780 check each time a configuration starts
+
+[params]
+count = 50           # pings per trial
+interval_s = 0.2
+warmup = 5           # discard the first replies (ARP lookups inflate them)
+
+[matrix]
+net_profile = ["local", "coast", "transatlantic"]
+
+[[matrix.pairing]]
+name = "realistic"
+nat_a = "port_restricted"
+nat_b = "port_restricted"
+
+[[matrix.pairing]]
+name = "hardest"
+nat_a = "symmetric"
+nat_b = "port_restricted"
+upstream_b = "cgnat"
+cgn_b = "symmetric"

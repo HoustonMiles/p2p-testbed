@@ -1,0 +1,28 @@
+# =============================================================================
+# NAT matrix: is every NAT pairing the testbed can produce what it claims?
+#
+# Runs the RFC 5780 behaviour check from both peers for all 16 home-router
+# pairings, with side B both on the public internet and behind CGNAT.
+# This is the evidence for the paper's statement that each NAT configuration
+# was verified, and the list of configurations later experiments draw from.
+#
+#   uv run python -m p2prunner plan experiments/nat_matrix.toml
+#   uv run python -m p2prunner run  experiments/nat_matrix.toml
+# =============================================================================
+
+name = "nat_matrix"
+description = "RFC 5780 verification of every NAT pairing, with and without CGNAT on side B."
+trial = "nat_verify"
+runs = 3            # the check is deterministic; a few repeats catch flaky behaviour
+block_size = 3
+seed = 1
+verify_nat = false  # the trial itself is the verification
+
+[matrix]
+nat_a = ["full_cone", "restricted", "port_restricted", "symmetric"]
+nat_b = ["full_cone", "restricted", "port_restricted", "symmetric"]
+upstream_b = ["wan", "cgnat"]   # behind CGNAT, side B's CGN is port_restricted (the default)
+# "local" has no packet loss. Random loss can make the RFC 5780 test read a
+# lost reply as "the NAT blocked it" and report the wrong behaviour, so the
+# verification runs loss-free. (Latency does not affect the result.)
+net_profile = ["local"]

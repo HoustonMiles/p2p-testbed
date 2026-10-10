@@ -162,6 +162,7 @@ services:
     networks:
       wan: { ipv4_address: 203.0.113.100 }
     healthcheck:                    # healthy once it answers a real STUN request
+      # timeout: the client can wait on RFC 5780 replies; cap each check.
       test: ["CMD", "timeout", "3", "turnutils_stunclient", "203.0.113.100"]
       interval: 1s
       timeout: 5s

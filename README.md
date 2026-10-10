@@ -21,6 +21,11 @@ simulated latency, jitter, loss and link capacity between them.
   ```nix
   virtualisation.docker.enable = true;
   networking.firewall.checkReversePath = "loose";
+  # Loose alone still drops unsolicited packets forwarded through two NATs
+  # (cone NAT behind CGNAT), so skip the check on Docker bridges entirely:
+  networking.firewall.extraCommands = ''
+    iptables -t mangle -I nixos-fw-rpfilter -i br-+ -j RETURN
+  '';
   boot.kernelModules = [ "sch_netem" "ifb" "ip_set" "ip_set_bitmap_port" "ip_set_hash_ipport" "xt_set" ];
   ```
 
@@ -119,6 +124,73 @@ NAT correctly blocks, so give it a `timeout`.
 - **netem jitter reorders packets.** Keep this in mind when testing the
   replay window.
 
+## Running experiments
+
+`p2prunner` (Python, run with uv) runs an experiment file: it brings up each
+configuration, verifies its NAT behaviour, runs the trials and saves results.
+
+```bash
+uv run python -m p2prunner plan experiments/path_baseline.toml   # configurations + time estimate
+uv run python -m p2prunner run  experiments/path_baseline.toml   # run it
+uv run python -m p2prunner run  experiments/path_baseline.toml --runs 2   # quick test
+uv run python -m p2prunner run --resume results/path_baseline/<time>      # continue after Ctrl+C
+```
+
+For an overnight run, start it inside `tmux` (or `nohup ... &`) so closing the
+terminal doesn't stop it.
+
+**Experiment files** (`experiments/*.toml`) set the trial type, its
+`[params]`, the runs per configuration and a `[matrix]`. Every combination of
+matrix values is one configuration; tables in the matrix (`[[matrix.pairing]]`)
+bundle several settings under one name. Matrix keys: `nat_a`, `nat_b`,
+`upstream_a`, `upstream_b`, `cgn_a`, `cgn_b`, `net_profile`, `uplink_mbit`,
+`downlink_mbit`, `udp_timeout`, `udp_timeout_stream`.
+
+| Experiment | What it measures |
+|---|---|
+| `nat_matrix` | RFC 5780 check of all 16 NAT pairings, with and without CGNAT (~26 min) |
+| `path_baseline` | Access-path RTT, realistic and hardest pairings, 3 distances (~45 min) |
+| `example_command` | Template for running your own programs on the peers |
+
+**Trial types:** `nat_verify` (RFC 5780 check), `ping` (RTT from both peers to
+a WAN host), and `command`, which runs `cmd_a`/`cmd_b` on the peers. Each command
+prints one JSON object on its last line, and its keys become result columns
+(prefixed `a_`/`b_`). This is the hook for the Go client.
+
+**How trials are run:**
+- Each configuration's trials are split into blocks (`block_size`), and the
+  blocks of all configurations are shuffled with the experiment's `seed`. This
+  spreads slow drift over a long run across configurations.
+- Before every trial, all routers' NAT state (conntrack, ipset) is flushed, so
+  no mapping from one trial can affect the next.
+- Each time a configuration starts, its NAT behaviour is verified first. A
+  configuration that fails twice is skipped and recorded as failed.
+
+**Results** go to `results/<experiment>/<start time>/`:
+
+| File | Contents |
+|---|---|
+| `trials.jsonl` / `trials.csv` | one row per trial: configuration + metrics |
+| `configs.jsonl` | every configuration start, with its NAT verification |
+| `meta.json` | date, git commit (and whether there were uncommitted changes), Docker/kernel versions, seed |
+| `experiment.toml` | exact copy of the experiment that ran |
+| `raw/` | full details per trial (e.g. every RTT sample) |
+
+## Analysis
+
+```bash
+uv run --group analysis jupyter lab analysis/results.ipynb
+```
+
+The notebook loads the newest run of each experiment: the NAT verification
+table, the path-baseline summary and RTT chart, and the columns of any
+`command` experiment.
+
+On NixOS, if importing pandas fails with a missing `libstdc++` or `libz`, add
+`programs.nix-ld.enable = true;` to `configuration.nix` and rebuild. Python
+wheels from PyPI expect those libraries in standard places.
+
 ## Coming next
 
-- Step 4: Python runner that loops over configurations and collects results.
+- Go client: direct channel (hole punching + Noise), then the relay baseline
+  and port-hopping, run through the `command` trial type.
