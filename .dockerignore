@@ -1,0 +1,14 @@
+# The host image is built from the repository root (it needs baseline/ for the
+# Go tools). Keep everything it doesn't need out of the build context, so
+# builds stay fast and results never end up inside an image.
+.git
+.venv
+results
+analysis
+experiments
+p2prunner
+scripts
+**/__pycache__
+**/.ipynb_checkpoints
+*.md
+.env

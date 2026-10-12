@@ -282,3 +282,4 @@ def main(argv=None) -> int:
     except (ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
+

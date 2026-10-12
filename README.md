@@ -29,6 +29,9 @@ attackers across NAT types?
 | Experiment runner (matrix, state reset, resume, metadata) | done | `p2prunner/` |
 | Trial types `nat_verify`, `ping`, `command` | done | `p2prunner/trials.py` |
 | Analysis notebook | done | `analysis/results.ipynb` |
+| Raw UDP hole-punching baseline (STUN, rendezvous, punch, peer-to-peer RTT, throughput) | done, tests pass | `baseline/` (`punch`, `rendezvous`) |
+| Rendezvous server in the testbed | done | `rendezvous` service, 203.0.113.101:7000 |
+| Hole-punching experiments | ready, not yet run on the real testbed | `experiments/punch_matrix.toml`, `experiments/punch_path.toml` |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
 | **Result:** path baseline | 180/180 trials; RTT within 0.4 ms of target, jitter matches netem theory | `results/path_baseline/20261009-175144` |
 
@@ -48,7 +51,6 @@ NAT processing overhead (the testbed's noise floor).
 
 | Part | What it is for |
 |---|---|
-| **Raw UDP hole-punching baseline (not built)** | A plain UDP tool on the peers (STUN, hole punching, peer-to-peer RTT, throughput) with no Noise or port-hopping. It would give the per-pairing hole-punching success matrix, the peer-to-peer RTT baseline and a check of the bandwidth caps. Until it exists, those baselines come from the Go client, or from an established ICE library such as pion/ice, run through the `command` trial type. |
 | Direct channel (Go): hole punching + Noise handshake | The direct path under test |
 | Relay baseline: coturn as a TURN relay in the testbed (203.0.113.102) | The comparison baseline |
 | Port-hopping on the direct channel | The project's novelty |
@@ -96,7 +98,7 @@ NAT processing overhead (the testbed's noise floor).
 
 ```bash
 ./scripts/host_setup.sh                 # once per boot (uses sudo)
-docker compose up -d --build --wait     # build and start, waits until configured
+docker compose up -d --build --wait     # build (incl. the Go tools) and start
 ./scripts/smoke_test.sh                 # sanity check (seconds)
 ./scripts/verify_nat.sh                 # RFC 5780 check of the running NAT types (~10 s)
 ./scripts/verify_nat.sh --all           # check every NAT type and CGNAT (~1 min)
@@ -134,7 +136,8 @@ Containers must be recreated (`down` then `up`) for new settings to apply.
 | nat-b | LAN 192.168.20.2, WAN 203.0.113.20, carrier 100.64.2.10 |
 | cgn-a / cgn-b | carrier 100.64.1.2 / 100.64.2.2, WAN 203.0.113.11 / 203.0.113.21 |
 | stun | 203.0.113.100 and alternate 203.0.113.103, UDP/TCP 3478 and 3479 |
-| reserved | .101 rendezvous, .102 coturn relay, .200+ attackers |
+| rendezvous | 203.0.113.101, UDP 7000 |
+| reserved | .102 coturn relay, .200+ attackers |
 
 A side's public IP is its home router's WAN IP, or its CGN's WAN IP when
 `UPSTREAM=cgnat`.
@@ -181,6 +184,12 @@ NAT correctly blocks, so give it a `timeout`.
   nothing leaks to the host's real network.
 - **Docker 28+:** the networks use `gateway_mode_ipv4: nat-unprotected`.
   Without it, Docker drops the routed traffic our NAT routers rely on.
+- **No host masquerading:** the networks also set `enable_ip_masquerade: false`.
+  Otherwise Docker's host rule rewrites the source of the first packet of a
+  flow that a cone NAT forwards from the WAN onto a LAN (to 192.168.x.1), and
+  the peer replies to an address that doesn't exist. This only affected
+  unsolicited inbound traffic; the NAT matrix verdicts and ping baselines
+  recorded before the fix are unaffected.
 - **netem jitter reorders packets.** Keep this in mind when testing the
   replay window.
 
@@ -210,6 +219,8 @@ bundle several settings under one name. Matrix keys: `nat_a`, `nat_b`,
 |---|---|
 | `nat_matrix` | RFC 5780 check of all 16 NAT pairings, with and without CGNAT (~15 min) |
 | `path_baseline` | Access-path RTT, realistic and hardest pairings, 3 distances (~35 min) |
+| `punch_matrix` | Raw UDP hole-punching success and peer-to-peer RTT, all 16 pairings with and without CGNAT (~1 h) |
+| `punch_path` | Peer-to-peer RTT and throughput over the punched path, 2 pairings x 3 distances, 50 Mbit/s links (~20 min) |
 | `example_command` | Template for running your own programs on the peers |
 
 **Trial types:** `nat_verify` (RFC 5780 check), `ping` (RTT from both peers to
@@ -236,6 +247,59 @@ prints one JSON object on its last line, and its keys become result columns
 | `experiment.toml` | exact copy of the experiment that ran |
 | `raw/` | full details per trial (e.g. every RTT sample) |
 
+## Raw UDP hole-punching baseline
+
+`baseline/` is a Go module with two programs, compiled into the peer image
+(`host/Dockerfile` runs `go vet` and `go test` during the build):
+
+- `rendezvous` runs as the `rendezvous` service and introduces the two peers
+  of each session to each other. It never relays their traffic.
+- `punch` runs on both peers at once, on one UDP socket: STUN, registration
+  with the rendezvous, hole punching (switching to the peer's real address
+  if its packets arrive from a different port), peer-to-peer pings, then
+  throughput a->b and b->a. It prints one JSON line of results at the end.
+
+No encryption and no port-hopping: these numbers are the floor that the Noise
+channel and the relay are compared against.
+
+**Run it through the runner** (the normal way; the trial seed is used as the
+session ID, so both peers of a trial find each other):
+
+```bash
+uv run python -m p2prunner run experiments/punch_matrix.toml   # which pairings connect (~1 h)
+uv run python -m p2prunner run experiments/punch_path.toml     # RTT + throughput (~20 min)
+```
+
+**Run it by hand** for a single try, in two terminals at the same time:
+
+```bash
+docker compose exec peer-a punch -role a -session 42
+docker compose exec peer-b punch -role b -session 42
+```
+
+Use a new `-session` number for each try. `punch -h` lists every flag
+(timeouts, ping count, rate, duration, packet size).
+
+**Reading the results:**
+
+- A pairing **succeeded** when `a_punched` and `b_punched` are both true.
+  `ok` only means the tool ran: a failed punch is a valid result. (If only one
+  side punched, that side exits with an error and the row has `ok = false`.)
+- `punch_ms` is quantised to roughly the punch interval (50 ms) plus the RTT,
+  because the first punches are dropped until the other side's NAT opens.
+- `mapping_varies` (STUN and rendezvous saw different ports) measures
+  endpoint-dependent mapping directly, and should agree with the NAT matrix.
+- Peer-to-peer RTT crosses both routers, so it equals the full profile RTT
+  (10 / 70 / 150 ms), not the half measured in the path baseline.
+- Compare throughput with the cap using `rx_ip_mbit`. netem also counts the
+  14-byte Ethernet header, so with 1200-byte payloads the maximum is about
+  98.9% of the cap.
+
+Expected success (cone and symmetric NATs, RFC 4787 behaviour): any pairing
+with a full cone side connects; symmetric with address-restricted connects via
+the peer's real address; symmetric with port-restricted or symmetric does not,
+and those pairings need the relay.
+
 ## Analysis
 
 ```bash
@@ -243,7 +307,8 @@ uv run --group analysis jupyter lab analysis/results.ipynb
 ```
 
 The notebook loads the newest run of each experiment: the NAT verification
-table, the path-baseline summary and RTT chart, and the columns of any
+table, the path-baseline summary and RTT chart, the hole-punching success
+matrix, the punched-path RTT and throughput, and the columns of any other
 `command` experiment.
 
 On NixOS, Python packages from PyPI look for `libstdc++` and other system

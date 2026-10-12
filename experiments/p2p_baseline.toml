@@ -1,0 +1,53 @@
+# =============================================================================
+# Peer-to-peer baseline: RTT and throughput of the plain punched UDP path.
+#
+# The raw UDP baseline (baseline/) punches a direct path, then
+#   - both peers ping each other (peer-to-peer RTT, both sides measure), and
+#   - each side sends 20 Mbit/s to the other for 3 s, through a 10 Mbit/s
+#     uplink cap, so the receiver should measure about the cap.
+# No Noise and no port-hopping: this is the floor that the direct channel's
+# overhead is measured against.
+#
+# Expected RTT: the full profile RTT (local 10 ms, coast 70 ms,
+# transatlantic 150 ms), since each side's router adds half of it.
+# Expected throughput: rx_ip_mbit a little under UPLINK_MBIT. netem's rate
+# also counts the 14-byte Ethernet header, so 1228-byte IP packets arrive at
+# 10 * 1228 / 1242 = 9.89 Mbit/s. Loss is about half, since 20 Mbit/s is
+# offered into a 10 Mbit/s link.
+#
+# Two pairings that punch:
+#   realistic          port-restricted cone on both sides
+#   symmetric_to_cone  symmetric NAT on side A, full cone on side B (B learns
+#                      A's real port from A's packets)
+#
+#   uv run python -m p2prunner plan experiments/p2p_baseline.toml
+#   uv run python -m p2prunner run  experiments/p2p_baseline.toml
+# =============================================================================
+
+name = "p2p_baseline"
+description = "Peer-to-peer RTT and capped throughput over a raw punched UDP path, 2 pairings, 3 distances."
+trial = "punch"
+runs = 20
+block_size = 10
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 60
+est_trial_s = 22
+args = "-pings 50 -ping-interval 100ms -rate-mbit 20 -duration 3s -size 1200 -drain 2s"
+
+[matrix]
+net_profile = ["local", "coast", "transatlantic"]
+uplink_mbit = ["10"]
+downlink_mbit = ["50"]
+
+[[matrix.pairing]]
+name = "realistic"
+nat_a = "port_restricted"
+nat_b = "port_restricted"
+
+[[matrix.pairing]]
+name = "symmetric_to_cone"
+nat_a = "symmetric"
+nat_b = "full_cone"

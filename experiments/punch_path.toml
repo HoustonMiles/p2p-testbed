@@ -1,0 +1,50 @@
+# =============================================================================
+# Punch path: what does the raw direct path deliver once it is open?
+#
+# Peer-to-peer RTT and throughput over the punched UDP path, for two pairings
+# that CAN connect directly, at all three distances, with a 50 Mbit/s access
+# link on every side. The tool offers 60 Mbit/s per direction, above the cap,
+# so the received rate shows the cap itself.
+#
+#   realistic   port-restricted cone on both sides (the common home setup)
+#   hard        symmetric NAT on side A, address-restricted cone on side B:
+#               the hardest pairing that still connects directly (via the
+#               peer-reflexive address). Pairings harder than this need the relay.
+#
+# Expected:
+#   rtt_ms_*     the full profile RTT: ~10 / 70 / 150 ms (both routers delay)
+#   rx_ip_mbit   just under 50 (netem also counts the 14-byte Ethernet header,
+#                so about 50 x 1228/1242 = 49.4 at 1200-byte payloads)
+#
+#   uv run python -m p2prunner plan experiments/punch_path.toml
+#   uv run python -m p2prunner run  experiments/punch_path.toml
+# =============================================================================
+
+name = "punch_path"
+description = "Peer-to-peer RTT and throughput over the punched path, 2 pairings x 3 distances, 50 Mbit/s links."
+trial = "command"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 90
+est_trial_s = 15
+cmd_a = "punch -role a -session $seed -quiet -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+cmd_b = "punch -role b -session $seed -quiet -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+
+[matrix]
+net_profile = ["local", "coast", "transatlantic"]
+uplink_mbit = ["50"]
+downlink_mbit = ["50"]
+
+[[matrix.pairing]]
+name = "realistic"
+nat_a = "port_restricted"
+nat_b = "port_restricted"
+
+[[matrix.pairing]]
+name = "hard"
+nat_a = "symmetric"
+nat_b = "restricted"

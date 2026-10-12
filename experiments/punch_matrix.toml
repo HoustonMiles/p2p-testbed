@@ -1,0 +1,46 @@
+# =============================================================================
+# Punch matrix: which NAT pairings can open a DIRECT path at all?
+#
+# Runs the raw UDP hole-punching baseline (baseline/cmd/punch) on both peers
+# for all 16 home-router pairings, with side B on the public internet and
+# behind CGNAT. No encryption, no port-hopping: this is the traversal
+# baseline that the Noise channel and the relay are compared against.
+#
+# Per trial, each side reports (columns prefixed a_ / b_):
+#   punched            did hole punching succeed from this side
+#   punch_ms           time from the rendezvous introduction to success
+#   mapping_varies     STUN and rendezvous saw different public ports
+#                      (endpoint-dependent mapping, i.e. symmetric behaviour)
+#   peer_addr_changed  had to switch to the peer's real (peer-reflexive) address
+#   rtt_ms_*           peer-to-peer round-trip time (full profile RTT, ~70 ms here)
+#
+# Success for a pairing = a_punched AND b_punched. `ok` only says the tool ran;
+# a failed punch is a valid result with ok = true and punched = false.
+#
+#   uv run python -m p2prunner plan experiments/punch_matrix.toml
+#   uv run python -m p2prunner run  experiments/punch_matrix.toml
+# =============================================================================
+
+name = "punch_matrix"
+description = "Raw UDP hole-punching success and peer-to-peer RTT for every NAT pairing, with and without CGNAT."
+trial = "command"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true         # RFC 5780 check each time a configuration starts
+
+[params]
+timeout_s = 60            # whole trial; the tool's own timeouts end well before this
+est_trial_s = 6           # for `plan` time estimates (failed punches take ~11 s)
+# $seed is the same for both peers in a trial, so it doubles as the session ID.
+# Throughput is skipped here (-rate-mbit 0); see punch_path.toml.
+cmd_a = "punch -role a -session $seed -quiet -pings 20 -ping-interval 50ms -rate-mbit 0"
+cmd_b = "punch -role b -session $seed -quiet -pings 20 -ping-interval 50ms -rate-mbit 0"
+
+[matrix]
+nat_a = ["full_cone", "restricted", "port_restricted", "symmetric"]
+nat_b = ["full_cone", "restricted", "port_restricted", "symmetric"]
+upstream_b = ["wan", "cgnat"]   # behind CGNAT, side B's CGN is port_restricted (the default)
+# Realistic distance with some loss: hole punching retries, so a little loss
+# is part of what is being measured.
+net_profile = ["coast"]

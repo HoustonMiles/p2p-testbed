@@ -229,3 +229,4 @@ def command(tb, cfg, params, ctx) -> dict:
 
 
 TRIALS = {"nat_verify": nat_verify, "ping": ping, "command": command}
+
