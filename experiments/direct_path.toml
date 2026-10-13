@@ -1,0 +1,47 @@
+# =============================================================================
+# Direct path (Experiment B): what do encryption and port-hopping cost?
+#
+# The same measurements as punch_path.toml (peer-to-peer RTT and throughput,
+# 50 Mbit/s access links, 60 Mbit/s offered per direction, three distances),
+# but through the direct channel: Noise-encrypted, hopping ports every second.
+# Compare each column with punch_path's to get the cost.
+#
+# Only the realistic pairing (port-restricted cone on both sides): pairings
+# with a symmetric NAT can punch but cannot hop (see hop_matrix.toml).
+#
+# Expected:
+#   rtt_ms_*     the same as punch_path, within noise (crypto adds microseconds)
+#   rx_mbit      a little lower than punch_path: every packet now carries
+#                25 more bytes (Noise header and tag) through the same cap.
+#                rx_ip_mbit counts them, so it should still be just under 50.
+#   rx_loss      the extra loss hopping causes, if any, beyond punch_path's
+#   hop_hops_missed  0
+#
+#   uv run python -m p2prunner plan experiments/direct_path.toml
+#   uv run python -m p2prunner run  experiments/direct_path.toml
+# =============================================================================
+
+name = "direct_path"
+description = "Peer-to-peer RTT and throughput over the Noise-encrypted, port-hopping direct channel, 3 distances, 50 Mbit/s links."
+trial = "command"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 90
+est_trial_s = 16
+cmd_a = "punch -role a -session $seed -quiet -direct -hop-interval 1s -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+cmd_b = "punch -role b -session $seed -quiet -direct -hop-interval 1s -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+
+[matrix]
+net_profile = ["local", "coast", "transatlantic"]
+uplink_mbit = ["50"]
+downlink_mbit = ["50"]
+
+[[matrix.pairing]]
+name = "realistic"
+nat_a = "port_restricted"
+nat_b = "port_restricted"
+

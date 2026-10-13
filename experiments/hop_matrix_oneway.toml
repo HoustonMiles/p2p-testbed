@@ -1,0 +1,72 @@
+# =============================================================================
+# Hop matrix, one-way pairings: a rerun of the 6 hop_matrix configurations
+# that failed (ok = 0/10) before the hopping barrier waited for an ack.
+#
+# In each, one side has a symmetric NAT and the other a cone NAT that lets
+# the punch through. With -hop-force the symmetric side can SEND to the cone
+# side's hop port (the cone NAT accepts any source), but cannot RECEIVE on
+# its own (its public port is random, not the derived one). The cone side
+# used to pass the hopping barrier on the inbound half alone, then fail at
+# the next step, which made the whole trial an error.
+#
+# Expected now: ok on every trial, punched = true, hop_possible = false,
+# hop_connected = false on both sides. The symmetric side's peer
+# (the cone side) still shows hop_probes_recv > 0: the one direction
+# that works.
+#
+#   uv run python -m p2prunner run experiments/hop_matrix_oneway.toml
+# =============================================================================
+
+name = "hop_matrix_oneway"
+description = "Rerun of the hop_matrix pairings with one symmetric side that can punch: one-way hop paths."
+trial = "command"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 60
+est_trial_s = 16
+cmd_a = "punch -role a -session $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
+cmd_b = "punch -role b -session $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
+
+[matrix]
+net_profile = ["coast"]
+
+[[matrix.pairing]]
+name = "full_cone-symmetric-wan"
+nat_a = "full_cone"
+nat_b = "symmetric"
+upstream_b = "wan"
+
+[[matrix.pairing]]
+name = "full_cone-symmetric-cgnat"
+nat_a = "full_cone"
+nat_b = "symmetric"
+upstream_b = "cgnat"
+
+[[matrix.pairing]]
+name = "restricted-symmetric-wan"
+nat_a = "restricted"
+nat_b = "symmetric"
+upstream_b = "wan"
+
+[[matrix.pairing]]
+name = "restricted-symmetric-cgnat"
+nat_a = "restricted"
+nat_b = "symmetric"
+upstream_b = "cgnat"
+
+[[matrix.pairing]]
+name = "symmetric-full_cone-wan"
+nat_a = "symmetric"
+nat_b = "full_cone"
+upstream_b = "wan"
+
+[[matrix.pairing]]
+name = "symmetric-restricted-wan"
+nat_a = "symmetric"
+nat_b = "restricted"
+upstream_b = "wan"
+

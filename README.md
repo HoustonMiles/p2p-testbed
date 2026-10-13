@@ -31,9 +31,17 @@ attackers across NAT types?
 | Analysis notebook | done | `analysis/results.ipynb` |
 | Raw UDP hole-punching baseline (STUN, rendezvous, punch, peer-to-peer RTT, throughput) | done, tests pass | `baseline/` (`punch`, `rendezvous`) |
 | Rendezvous server in the testbed | done | `rendezvous` service, 203.0.113.101:7000 |
-| Hole-punching experiments | ready, not yet run on the real testbed | `experiments/punch_matrix.toml`, `experiments/punch_path.toml` |
+| Direct channel: Noise handshake (NNpsk0), encrypted UDP transport with replay window | done, tests pass | `baseline/internal/direct/noise.go` |
+| Port-hopping: clock-based HKDF port schedule, early open + probing, drain-based close | done, tests pass | `baseline/internal/direct/schedule.go`, `hopper.go` |
+| `punch -direct`: handshake, port check, hopping, then ping + throughput through the hopper | done, tests pass | `baseline/internal/peer/`, `baseline/cmd/punch` |
+| Clock offset/drift flags | done | `punch -clock-offset`, `-clock-drift-ppm` |
+| Result summary scripts (standard library only) | done | `scripts/hop_summary.py`, `scripts/compare_runs.py` |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
 | **Result:** path baseline | 180/180 trials; RTT within 0.4 ms of target, jitter matches netem theory | `results/path_baseline/20261009-175144` |
+| **Result:** punch matrix (raw baseline) | 320/320 trials; 24/32 configurations punch, exactly as RFC 4787 predicts | `results/punch_matrix/20261012-124540` |
+| **Result:** punch path (raw baseline) | 60/60 trials; RTT = profile RTT, link fully used | `results/punch_path/20261012-132335` |
+| **Result:** Experiment A, hop success | 320/320 trials; hopping holds in all 18 configurations where both NATs keep ports, fails in the rest, as the port check predicts | `results/hop_matrix/20261012-104647` + `results/hop_matrix_oneway/20261012-121649` |
+| **Result:** Experiment B, performance cost | 30/30 trials; no latency cost, -2.0% goodput (= Noise overhead), no loss from hopping | `results/direct_path/` (latest run, drain-based close) |
 
 Path baseline (each peer to the STUN server, median of 30 trials):
 
@@ -47,17 +55,68 @@ The realistic and hardest pairings measure the same, so the NAT type itself
 adds no measurable delay. The constant ~0.2 ms above target is container and
 NAT processing overhead (the testbed's noise floor).
 
+#### Experiment A: where does port-hopping hold?
+
+`hop_matrix` (all 16 pairings x side B on the WAN or behind CGNAT, coast
+profile, 1 s slots, `-hop-force`), with `hop_matrix_oneway` rerunning the 6
+configurations that crashed before the hopping barrier waited for an ack.
+Summarised with `scripts/hop_summary.py`.
+
+| Group | Configurations | Result |
+|---|---|---|
+| Both NATs keep the local port (no symmetric NAT anywhere) | 18 (incl. CGNAT on B) | hopping connected and clean in 180/180 trials: no missed hop, ~5 hops per side, RTT 70.2 to 70.8 ms, ping loss 0 to 1% (the profile's own loss) |
+| One side symmetric, punch still succeeds | 6 | one-way only: the cone side receives on every slot (median 9 hops), the symmetric side on none |
+| Punch fails (symmetric vs port-restricted or symmetric; a CGN counts as port-restricted) | 8 | never reach hopping; these need the relay |
+
+The port check made before hopping (`hop_possible`: STUN-mapped port equals
+the local port on both sides) predicted the outcome in all 32
+configurations, so the handoff to the relay can be decided before any hop
+is tried. CGNAT does not break hopping here only because both Linux NAT
+layers keep the source port (see Paper updates: threats to validity).
+
+#### Experiment B: what do Noise and hopping cost?
+
+`direct_path` against `punch_path`, realistic pairing (port-restricted on
+both sides), 50 Mbit/s links, 60 Mbit/s offered per direction, 1 s slots.
+Medians of 10 trials, both sides. Compared with `scripts/compare_runs.py`.
+
+| Profile | RTT p50 raw / direct | rx_ip_mbit raw / direct | rx_mbit raw / direct | rx_loss raw / direct | Handshake |
+|---|---|---|---|---|---|
+| local | 10.68 / 10.67 ms | 49.43 / 49.44 | 48.31 / 47.35 | 0.143 / 0.159 | 8.8 ms |
+| coast | 70.55 / 70.96 ms | 49.34 / 49.36 | 48.22 / 47.27 | 0.153 / 0.169 | 64.0 ms |
+| transatlantic | 151.95 / 151.44 ms | 49.34 / 49.30 | 48.21 / 47.22 | 0.165 / 0.180 | 128.6 ms |
+
+- No latency cost: RTT p50, p95 and jitter unchanged within 0.25 ms.
+- The link is fully used (`rx_ip_mbit` unchanged). Goodput is 2.0% lower:
+  each packet carries 25 more bytes (1228 -> 1253 on the wire).
+- The extra loss is the same overhead, not hopping: the sender offers the
+  same packets per second, 2% fewer fit through the cap, so
+  1 - (1 - raw loss) x 0.980 predicts 0.160 / 0.170 / 0.182, measured
+  0.159 / 0.169 / 0.180.
+- The handshake costs about one RTT, once per session.
+
+**Overlap finding.** The first `direct_path` run used a fixed 100 ms overlap
+(the old port closed 100 ms after each boundary) and lost ~8% more
+(`rx_loss` 0.22 to 0.26, `rx_ip_mbit` ~45): with the link saturated, the
+1000-packet router queue holds ~200 ms of packets for the old port, plus the
+one-way delay. A 400 ms overlap (`direct_path_overlap`) removed the loss,
+which confirmed the cause; the hopper now closes the old port once it has
+drained instead (see Direct channel). The overlap must cover queueing delay,
+not just the RTT.
+
+Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
+`results/direct_path_overlap/20261012-140631`.
+
 ### Not done
 
 | Part | What it is for |
 |---|---|
-| Direct channel (Go): hole punching + Noise handshake | The direct path under test |
-| Relay baseline: coturn as a TURN relay in the testbed (203.0.113.102) | The comparison baseline |
-| Port-hopping on the direct channel | The project's novelty |
-| Handoff Manager | Falls back to the relay when hopping can't hold |
-| Attack harness: flood containers and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |
-| Experiments A/B/C | A: traversal and hop success. B: performance cost. C: attack resilience |
-| Clock offset/drift flags in the client | Tests the time-based hop schedule against unsynchronized clocks |
+| Relay baseline: coturn as a TURN relay in the testbed (203.0.113.102), `punch -relay`, `relay_path` experiment | The comparison baseline, and the path for pairings that cannot hop |
+| Handoff Manager | Falls back to the relay when `hop_possible` is false or hopping stops holding |
+| Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |
+| Experiment C | Attack resilience, direct hopping vs relay (`hop_drain_cutoffs`, `hop_foreign`, `hop_auth_failed` are there for it) |
+| Clock experiment files | Sweep `-clock-offset` / `-clock-drift-ppm` against the hop tolerance (min of `-hop-lead` and `-hop-min-overlap`); the runner cannot vary command parameters yet, so one file per value or a runner change |
+| Rerun `direct_path` | Only to record the new `hop_drain_cutoffs` column (expected 0); the numbers above are already final |
 
 ### Paper updates pending
 
@@ -66,9 +125,21 @@ NAT processing overhead (the testbed's noise floor).
   verification run without packet loss).
 - Define jitter: the profiles' ±7 / ±11 ms per-direction ranges, or the
   measured standard deviation.
-- Report the NAT matrix and path baseline results.
+- Report the NAT matrix, path baseline, punch matrix and Experiments A and B
+  (tables above).
+- The overlap finding: the old port must stay open for the queueing delay,
+  not just the RTT; fixed 100 ms lost ~8% under load, drain-based close
+  loses nothing.
 - Threats to validity: shared kernel and CPU; host firewall settings needed
-  to reproduce (see Requirements).
+  to reproduce (see Requirements); the testbed's NATs (Linux MASQUERADE)
+  keep source ports, so CGNAT does not break hopping here, but many real
+  CGNs allocate port blocks or random ports, which would (behave like a
+  symmetric NAT for hopping).
+- Ping loss with vs without hopping: `hop_matrix` sends 100 pings per trial,
+  `punch_matrix` 20, so compare mean loss (or rerun with equal counts); the
+  medians (0 vs 0 to 1%) match the coast profile's own ~1% round-trip loss.
+- Hopping needs endpoint-independent mapping that keeps the port on BOTH
+  sides; with one symmetric side the hop path is one-way (Experiment A).
 - Find and verify a citation on AI-driven attacks against moving-target
   defenses.
 
@@ -221,6 +292,10 @@ bundle several settings under one name. Matrix keys: `nat_a`, `nat_b`,
 | `path_baseline` | Access-path RTT, realistic and hardest pairings, 3 distances (~35 min) |
 | `punch_matrix` | Raw UDP hole-punching success and peer-to-peer RTT, all 16 pairings with and without CGNAT (~1 h) |
 | `punch_path` | Peer-to-peer RTT and throughput over the punched path, 2 pairings x 3 distances, 50 Mbit/s links (~20 min) |
+| `hop_matrix` | Experiment A: direct channel, handshake and hop success for all 16 pairings with and without CGNAT (~1 h) |
+| `hop_matrix_oneway` | The 6 `hop_matrix` pairings with one symmetric side that can still punch (~20 min) |
+| `direct_path` | Experiment B: `punch_path` through the direct channel, realistic pairing x 3 distances (~10 min) |
+| `direct_path_overlap` | `direct_path` with `-hop-overlap 400ms`, the test that found the overlap problem (~10 min) |
 | `example_command` | Template for running your own programs on the peers |
 
 **Trial types:** `nat_verify` (RFC 5780 check), `ping` (RTT from both peers to
@@ -300,6 +375,68 @@ with a full cone side connects; symmetric with address-restricted connects via
 the peer's real address; symmetric with port-restricted or symmetric does not,
 and those pairings need the relay.
 
+## Direct channel (Noise + port-hopping)
+
+`punch -direct` runs the same steps and reports the same columns as the raw
+baseline, but after the punch it moves to the encrypted, port-hopping
+channel in `baseline/internal/direct/`:
+
+- `noise.go`: Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s handshake over the
+  punched socket (the pre-shared key stops a man in the middle at the
+  rendezvous), then a UDP transport with explicit nonces and a 2048-packet
+  replay window. The hop key is derived from the session keys.
+- `schedule.go`: time is cut into slots of `-hop-interval`; each side's port
+  for each slot is HKDF(hop key, role, slot), from the range 10000-32767
+  (below Linux's ephemeral ports). Nothing about the schedule is sent.
+- `hopper.go`: opens the next slot's port `-hop-lead` early and probes the
+  peer's next port until both directions work (the hole punch, repeated on
+  every hop), sends on the current slot, and closes the old port once it has
+  drained: after `-hop-min-overlap`, as soon as traffic has moved to the new
+  port and the old one has been quiet for `-hop-drain-idle`, and at the
+  latest after `-hop-overlap`.
+
+Steps added after the punch: Noise handshake; a barrier carrying each side's
+port check (does its NAT keep the local port); if both do (or `-hop-force`),
+start the hopper and pass a barrier through it that needs an ack, proving the
+first hop works both ways. A port check that fails, or a first hop that does
+not connect, is a result (`hop_possible` / `hop_connected` = false), not an
+error.
+
+```bash
+docker compose exec peer-a punch -role a -session 42 -direct -hop-interval 1s
+docker compose exec peer-b punch -role b -session 42 -direct -hop-interval 1s
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-direct` | off | use the direct channel |
+| `-psk` | derived from `-session` | 64 hex digits, the same on both peers. The default is a testbed convenience only: anyone who knows the session ID knows the key. Pass a random one for attack experiments. |
+| `-hop-interval` | 1s | slot length |
+| `-hop-lead` | interval/10 | open the next port this early |
+| `-hop-min-overlap` | interval/10 | keep the old port at least this long (with `-hop-lead`, the clock tolerance) |
+| `-hop-overlap` | interval/2 | close the old port at the latest after this long |
+| `-hop-drain-idle` | 50ms | quiet time that counts as drained |
+| `-hop-force` | off | hop even when a NAT changes ports, to measure the failure |
+| `-clock-offset`, `-clock-drift-ppm` | 0 | skew this peer's hop clock |
+
+Extra result columns: `direct`, `handshake_ms`, `keeps_port`,
+`peer_keeps_port`, `hop_possible`, `hopping`, `hop_connected`,
+`hop_interval_ms`, `clock_offset_ms`, `clock_drift_ppm`, and the hopper's
+counters, all prefixed `hop_`:
+
+| Column | Meaning |
+|---|---|
+| `hop_hops_ok`, `hop_hops_missed` | slots on which something from the peer arrived on our port (the slot running at start is not counted) |
+| `hop_sent`, `hop_received`, `hop_send_errors` | Data packets |
+| `hop_probes_sent`, `hop_probes_recv` | pinhole probes |
+| `hop_foreign`, `hop_auth_failed`, `hop_replayed` | dropped on arrival: wrong source IP (before any crypto), failed authentication, replay |
+| `hop_bind_failed` | our port for a slot was taken |
+| `hop_drain_ms_avg` | how long old ports stayed open after the boundary (mixes busy and idle hops) |
+| `hop_drain_cutoffs` | old ports closed at `-hop-overlap` while Data was still arriving: the hops that can lose packets. Should be 0. |
+| `hop_late_opens` | the sender found the current slot not yet open (housekeeping fell behind). Should be 0. |
+
+`rx_ip_mbit` also counts the 25 bytes Noise adds per packet in direct mode.
+
 ## Analysis
 
 ```bash
@@ -311,6 +448,21 @@ table, the path-baseline summary and RTT chart, the hole-punching success
 matrix, the punched-path RTT and throughput, and the columns of any other
 `command` experiment.
 
+Two summary scripts need only Python's standard library (no numpy/pandas,
+so no NixOS setup):
+
+```bash
+# Experiment A: hop success per pairing; later runs replace earlier ones per configuration
+python3 scripts/hop_summary.py results/hop_matrix/<run> results/hop_matrix_oneway/<run>
+
+# any two runs of the same configurations, e.g. Experiment B: raw vs direct
+python3 scripts/compare_runs.py results/punch_path/<run> results/direct_path/<run>
+```
+
+Replace `<run>` with the run's folder name (e.g. `20261012-132335`); typed
+literally, bash reads the angle brackets as redirection. Configurations are
+matched across experiments by the hash part of `config_id`.
+
 On NixOS, Python packages from PyPI look for `libstdc++` and other system
 libraries in standard Linux locations. Add `programs.nix-ld.enable = true;` to
 `configuration.nix`, rebuild, start a new login shell, and launch with:
@@ -318,3 +470,4 @@ libraries in standard Linux locations. Add `programs.nix-ld.enable = true;` to
 ```bash
 LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH uv run --group analysis jupyter lab analysis/results.ipynb
 ```
+

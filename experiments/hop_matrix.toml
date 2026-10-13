@@ -1,0 +1,47 @@
+# =============================================================================
+# Hop matrix (Experiment A): for which NAT pairings does port-hopping hold?
+#
+# Runs the direct channel (punch -direct) for all 16 home-router pairings,
+# with side B on the public internet and behind CGNAT: hole punch, Noise
+# handshake, then 5 s of pings over ports that change every second.
+# -hop-force makes the peers try hopping even when a NAT changes ports, so
+# the failure is measured rather than predicted.
+#
+# Per trial, each side reports (columns prefixed a_ / b_):
+#   punched          the hole punch worked (as in punch_matrix)
+#   handshake_ms     Noise handshake time over the punched path
+#   keeps_port       this side's NAT kept the local port as the public port
+#   hop_possible     both sides keep ports: hopping is expected to work
+#   hop_connected    the first hop worked both ways
+#   hop_hops_ok      slots on which the peer's packets reached this side
+#   hop_hops_missed  slots on which nothing arrived
+#   ping_loss, rtt_ms_*   over the hopping channel
+#
+# Hopping holds for a pairing when a_hop_connected AND b_hop_connected and
+# hop_hops_missed is 0 on both sides. Expected: every pairing without a
+# symmetric NAT; none with one (those need the relay).
+#
+#   uv run python -m p2prunner plan experiments/hop_matrix.toml
+#   uv run python -m p2prunner run  experiments/hop_matrix.toml
+# =============================================================================
+
+name = "hop_matrix"
+description = "Direct channel: handshake and port-hopping success for every NAT pairing, with and without CGNAT."
+trial = "command"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 60
+est_trial_s = 9           # failed hops wait out -step-timeout (10 s) first
+cmd_a = "punch -role a -session $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
+cmd_b = "punch -role b -session $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
+
+[matrix]
+nat_a = ["full_cone", "restricted", "port_restricted", "symmetric"]
+nat_b = ["full_cone", "restricted", "port_restricted", "symmetric"]
+upstream_b = ["wan", "cgnat"]
+net_profile = ["coast"]
+

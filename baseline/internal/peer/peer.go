@@ -1,7 +1,13 @@
-// Package peer is one side of the raw UDP baseline: STUN, rendezvous, hole
-// punching, then peer-to-peer RTT and throughput over the punched path.
-// No encryption and no port-hopping, so these numbers are the floor the
-// direct channel (Noise + hopping) is compared against.
+// Package peer is one side of a peer-to-peer trial: STUN, rendezvous, hole
+// punching, then peer-to-peer RTT and throughput.
+//
+// Two modes, same steps and same Result columns, so they compare directly:
+//
+//   - raw (default): plain UDP over the punched socket. No encryption and no
+//     port-hopping, so these numbers are the floor.
+//   - direct (Config.Direct): after the punch, a Noise handshake over the
+//     punched socket, then ping and throughput run through package direct's
+//     Hopper: encrypted, on ports that change every HopInterval.
 //
 // Everything uses ONE UDP socket, because the NAT mapping that the
 // rendezvous server sees is the one the peers punch through.
@@ -20,6 +26,17 @@
 //  5. Throughput a sends to b at RateMbit for Duration, then b sends to a;
 //     each receiver reports what arrived
 //
+// Direct mode adds, between 3 and 4:
+//
+//	3a. Handshake  a sends the first Noise message until b's reply arrives
+//	3b. Secured    barrier; each side's value says whether its NAT keeps the
+//	    local port as the public port, which hopping needs. If either does
+//	    not (symmetric NAT), stop here: hopping cannot work, and the full
+//	    system would hand off to the relay. -hop-force tries anyway.
+//	3c. Hopping    start the Hopper, then a barrier THROUGH it: proves the
+//	    first hop works both ways. If it does not, stop (a result, not an
+//	    error: hop_connected = false).
+//
 // Between steps both peers meet at a barrier, so one side's throughput test
 // never overlaps the other side's ping test.
 package peer
@@ -34,6 +51,7 @@ import (
 	"sync"
 	"time"
 
+	"p2ptestbed/baseline/internal/direct"
 	"p2ptestbed/baseline/internal/stun"
 	"p2ptestbed/baseline/internal/wire"
 )
@@ -61,6 +79,23 @@ type Config struct {
 	Drain    time.Duration // after a direction ends, wait for queued packets
 
 	Linger time.Duration // keep answering the peer this long before exiting
+
+	// Direct channel. Everything below is ignored unless Direct is set.
+	Direct           bool
+	PSK              []byte        // Noise pre-shared key, 32 bytes, the same on both peers
+	HandshakeTimeout time.Duration // 0 = PunchTimeout
+	HopInterval      time.Duration // slot length (required)
+	HopLead          time.Duration // open the next port this early; 0 = direct's default
+	HopMinOverlap    time.Duration // keep the old port at least this long; 0 = direct's default
+	HopOverlap       time.Duration // and at most this long, closing earlier once drained; 0 = direct's default
+	HopDrainIdle     time.Duration // how long the old port must be quiet to count as drained; 0 = default
+	HopForce         bool          // hop even if a NAT changes ports (to measure the failure)
+	ClockOffset      time.Duration // skew this peer's hop clock (clock experiments)
+	ClockDriftPPM    float64       // and/or make it run fast (+) or slow (-)
+
+	// Tests only: drop everything this peer sends through the Hopper, to
+	// mimic a NAT that blocks one direction of the hop path.
+	dropHopSends bool
 
 	Logf func(format string, args ...any)
 }
@@ -115,15 +150,31 @@ type Result struct {
 	RxMbit      *float64 `json:"rx_mbit"`    // UDP payload rate while packets arrived
 	RxIPMbit    *float64 `json:"rx_ip_mbit"` // same, counting the 28-byte IPv4+UDP headers
 
+	// Direct channel. Zero/null in raw mode, so both modes share columns.
+	Direct        bool     `json:"direct"`
+	HandshakeMs   *float64 `json:"handshake_ms"`    // from sending/awaiting the first message to Done
+	KeepsPort     *bool    `json:"keeps_port"`      // our NAT kept our local port (STUN port == local port)
+	PeerKeepsPort *bool    `json:"peer_keeps_port"` // the other side's, learned at the Secured barrier
+	HopPossible   *bool    `json:"hop_possible"`    // both keep ports, so hopping can work
+	Hopping       bool     `json:"hopping"`         // the Hopper was started
+	HopConnected  bool     `json:"hop_connected"`   // the barrier through the Hopper succeeded
+	HopIntervalMs *float64 `json:"hop_interval_ms"`
+	ClockOffsetMs float64  `json:"clock_offset_ms"`
+	ClockDriftPPM float64  `json:"clock_drift_ppm"`
+	direct.Stats           // hop_* counters (embedded: flat columns)
+
 	TotalMs float64 `json:"total_ms"`
 }
 
-// Barrier steps.
+// Barrier steps. The numbers must rise in the order the steps run: a peer
+// answers a Barrier for every step up to the one it has reached.
 const (
 	stepConnected = 1
-	stepPinged    = 2
-	stepAtoB      = 3
-	stepBtoA      = 4
+	stepSecured   = 2 // direct mode only
+	stepHopping   = 3 // direct mode only
+	stepPinged    = 4
+	stepAtoB      = 5
+	stepBtoA      = 6
 )
 
 const ipUDPHeader = 28
@@ -133,6 +184,7 @@ type inbound struct {
 	at   time.Duration // since start, taken when the packet was read
 	pkt  wire.Packet
 	stun []byte // set instead of pkt for STUN messages
+	hop  bool   // came through the Hopper; answer through it too
 }
 
 type runner struct {
@@ -154,6 +206,7 @@ type runner struct {
 	reached   uint64            // highest barrier step this side has reached
 	myValue   map[uint64]uint64 // value we attached to each step
 	peerValue map[uint64]uint64 // steps the peer has reached, with its value
+	acked     map[uint64]bool   // steps the peer answered with a BarrierAck
 	rtts      map[uint64]float64
 
 	// Data counters, updated by the reader goroutine.
@@ -162,6 +215,10 @@ type runner struct {
 	rxBytes   int64
 	rxFirst   time.Duration
 	rxLast    time.Duration
+
+	// Direct mode. Once hopper is set, all peer traffic goes through it.
+	hs     *direct.Handshake
+	hopper *direct.Hopper
 }
 
 // Run performs every step and returns what it measured. A failed punch is a
@@ -173,11 +230,20 @@ func Run(cfg Config) (*Result, error) {
 		in:        make(chan inbound, 4096),
 		myValue:   map[uint64]uint64{},
 		peerValue: map[uint64]uint64{},
+		acked:     map[uint64]bool{},
 		rtts:      map[uint64]float64{},
 		res: &Result{Role: string(cfg.Role), Session: cfg.Session,
 			RateMbit: cfg.RateMbit, PacketBytes: cfg.Size},
 	}
+	if cfg.Direct {
+		r.res.Direct = true
+		r.res.HopIntervalMs = ptr(ms(cfg.HopInterval))
+		r.res.ClockOffsetMs, r.res.ClockDriftPPM = ms(cfg.ClockOffset), cfg.ClockDriftPPM
+	}
 	err := r.run()
+	if r.hopper != nil {
+		r.res.Stats = r.hopper.Stats() // run() has closed it, so these are final
+	}
 	r.res.TotalMs = ms(time.Since(r.t0))
 	if err != nil {
 		r.res.Error = err.Error()
@@ -188,6 +254,9 @@ func Run(cfg Config) (*Result, error) {
 func (r *runner) run() error {
 	if r.cfg.Role != 'a' && r.cfg.Role != 'b' {
 		return errors.New("role must be a or b")
+	}
+	if r.cfg.Direct && r.cfg.HopInterval <= 0 {
+		return errors.New("direct mode needs a hop interval")
 	}
 	laddr, err := net.ResolveUDPAddr("udp4", r.cfg.Local)
 	if err != nil {
@@ -238,6 +307,25 @@ func (r *runner) run() error {
 	r.logf("punch: connected to %v in %.1f ms", r.remote, *r.res.PunchMs)
 	if err := r.barrier(stepConnected, 0, r.cfg.StepTimeout); err != nil {
 		return err
+	}
+
+	// 3a-c. Direct channel: handshake, then move to hopping ports.
+	if r.cfg.Direct {
+		// Registered after conn.Close, so it runs first: the Hopper's readers
+		// must stop before readLoop closes r.in.
+		defer func() {
+			if r.hopper != nil {
+				r.hopper.Close()
+			}
+		}()
+		up, err := r.startDirect()
+		if err != nil {
+			return err
+		}
+		if !up {
+			r.pump(r.cfg.Linger, 0, nil, never)
+			return nil
+		}
 	}
 
 	// 4. Ping
@@ -294,23 +382,45 @@ func (r *runner) readLoop() {
 			r.in <- inbound{from: from, at: at, stun: append([]byte(nil), b...)}
 			continue
 		}
-		p, ok := wire.Parse(b)
-		if !ok || p.Session != r.cfg.Session || p.Role == r.cfg.Role && p.Type != wire.PeerInfo {
-			continue
+		r.deliver(from, at, b, false)
+	}
+}
+
+// onHop receives the Hopper's decrypted Data packets, on its reader
+// goroutines. Their payload is a wire packet, handled like any other.
+func (r *runner) onHop(in direct.Inbound) {
+	r.deliver(in.From, in.At.Sub(r.t0), in.Payload, true)
+}
+
+// deliver handles one wire packet from the punched socket or the Hopper.
+// Data packets are only counted here; everything else goes to the main loop.
+func (r *runner) deliver(from netip.AddrPort, at time.Duration, b []byte, hop bool) {
+	p, ok := wire.Parse(b)
+	if !ok || p.Session != r.cfg.Session || p.Role == r.cfg.Role && p.Type != wire.PeerInfo {
+		return
+	}
+	if p.Type == wire.Data {
+		r.rxMu.Lock()
+		if r.rxPackets == 0 {
+			r.rxFirst = at
 		}
-		if p.Type == wire.Data {
-			r.rxMu.Lock()
-			if r.rxPackets == 0 {
-				r.rxFirst = at
-			}
-			r.rxPackets++
-			r.rxBytes += int64(n)
-			r.rxLast = at
-			r.rxMu.Unlock()
-			continue
-		}
-		p.Body = append([]byte(nil), p.Body...)
-		r.in <- inbound{from: from, at: at, pkt: p}
+		r.rxPackets++
+		r.rxBytes += int64(len(b))
+		r.rxLast = at
+		r.rxMu.Unlock()
+		return
+	}
+	p.Body = append([]byte(nil), p.Body...)
+	m := inbound{from: from, at: at, pkt: p, hop: hop}
+	if !hop {
+		r.in <- m
+		return
+	}
+	// Never block a Hopper reader: Close waits for them, and the main loop
+	// may already have stopped reading. A full queue counts as loss.
+	select {
+	case r.in <- m:
+	default:
 	}
 }
 
@@ -382,7 +492,7 @@ func (r *runner) handle(m inbound) {
 			r.gotAck, r.ackAt = true, m.at
 		}
 	case wire.Ping:
-		r.sendTo(m.from, wire.Pong, p.Seq, p.Body)
+		r.reply(m, wire.Pong, p.Seq, p.Body)
 	case wire.Pong:
 		sentAt := time.Duration(wire.ParseU64(p.Body))
 		if _, dup := r.rtts[p.Seq]; !dup && p.Seq < uint64(r.cfg.Pings) {
@@ -391,11 +501,55 @@ func (r *runner) handle(m inbound) {
 	case wire.Barrier:
 		r.peerValue[p.Seq] = wire.ParseU64(p.Body)
 		if r.reached >= p.Seq {
-			r.sendTo(m.from, wire.BarrierAck, p.Seq, wire.U64(r.myValue[p.Seq]))
+			r.reply(m, wire.BarrierAck, p.Seq, wire.U64(r.myValue[p.Seq]))
 		}
 	case wire.BarrierAck:
 		r.peerValue[p.Seq] = wire.ParseU64(p.Body)
+		r.acked[p.Seq] = true
+	case wire.Handshake:
+		// Before our own handshake starts (still at the Connected barrier)
+		// there is nothing to answer with; the initiator retransmits.
+		if r.hs == nil || m.hop {
+			return
+		}
+		reply, err := r.hs.Handle(p.Body)
+		if err != nil {
+			r.logf("handshake: dropped a bad message from %v: %v", m.from, err)
+			return
+		}
+		if reply != nil {
+			r.sendTo(m.from, wire.Handshake, 0, reply)
+		}
 	}
+}
+
+// reply answers m the way it came: through the Hopper, or on the punched
+// socket. A peer that is still one step behind (e.g. at the Secured barrier,
+// before its Hopper is up) keeps getting answers on the old path.
+func (r *runner) reply(m inbound, t wire.Type, seq uint64, body []byte) {
+	if m.hop && r.hopper != nil {
+		r.sendHop(t, seq, body)
+		return
+	}
+	r.sendTo(m.from, t, seq, body)
+}
+
+// sendPeer sends to the peer on the current path: the Hopper once it runs,
+// the punched socket before.
+func (r *runner) sendPeer(t wire.Type, seq uint64, body []byte) {
+	if r.hopper != nil {
+		r.sendHop(t, seq, body)
+		return
+	}
+	r.sendTo(r.remote, t, seq, body)
+}
+
+func (r *runner) sendHop(t wire.Type, seq uint64, body []byte) {
+	if r.cfg.dropHopSends {
+		return
+	}
+	p := wire.Packet{Type: t, Role: r.cfg.Role, Session: r.cfg.Session, Seq: seq, Body: body}
+	r.hopper.Send(p.Append(nil)) // errors count as loss
 }
 
 // learn switches to the address the peer's packets actually come from. Behind
@@ -419,10 +573,29 @@ func (r *runner) sendTo(to netip.AddrPort, t wire.Type, seq uint64, body []byte)
 func (r *runner) barrier(step, value uint64, timeout time.Duration) error {
 	r.reached, r.myValue[step] = step, value
 	ok := r.pump(timeout, 50*time.Millisecond,
-		func() { r.sendTo(r.remote, wire.Barrier, step, wire.U64(value)) },
+		func() { r.sendPeer(wire.Barrier, step, wire.U64(value)) },
 		func() bool { _, ok := r.peerValue[step]; return ok })
 	if !ok {
 		return fmt.Errorf("peer did not reach step %d within %v", step, timeout)
+	}
+	return nil
+}
+
+// barrierBothWays is a barrier that needs proof the path works both ways:
+// the peer's BarrierAck, which answers our own Barrier. barrier() also
+// passes on the peer's Barrier alone, which only proves the peer -> us
+// direction. That matters when one direction is broken: behind a symmetric
+// NAT, the side with the symmetric NAT can still send to a cone peer's hop
+// port but cannot receive on its own. With barrier(), the cone side would
+// pass, carry on alone and fail at the next step; here both sides fail
+// this step, and report it, together.
+func (r *runner) barrierBothWays(step uint64, timeout time.Duration) error {
+	r.reached, r.myValue[step] = step, 0
+	ok := r.pump(timeout, 50*time.Millisecond,
+		func() { r.sendPeer(wire.Barrier, step, wire.U64(0)) },
+		func() bool { return r.acked[step] })
+	if !ok {
+		return fmt.Errorf("peer did not confirm step %d within %v", step, timeout)
 	}
 	return nil
 }
@@ -454,7 +627,7 @@ func (r *runner) pingPhase() {
 	r.pump(time.Duration(r.cfg.Pings+1)*r.cfg.PingInterval+r.cfg.StepTimeout, r.cfg.PingInterval,
 		func() {
 			if sent < r.cfg.Pings {
-				r.sendTo(r.remote, wire.Ping, uint64(sent), wire.U64(uint64(time.Since(r.t0))))
+				r.sendPeer(wire.Ping, uint64(sent), wire.U64(uint64(time.Since(r.t0))))
 				sent++
 			}
 		},
@@ -505,7 +678,11 @@ func (r *runner) sendData() uint64 {
 			due := uint64(math.Min(time.Since(start).Seconds(), r.cfg.Duration.Seconds()) * pps)
 			for ; sent < due; sent++ {
 				putSeq(pkt, sent)
-				r.conn.WriteToUDPAddrPort(pkt, r.remote) // errors count as loss
+				if r.hopper != nil {
+					r.hopper.Send(pkt) // errors count as loss
+				} else {
+					r.conn.WriteToUDPAddrPort(pkt, r.remote) // errors count as loss
+				}
 			}
 		},
 		func() bool { return time.Since(start) >= r.cfg.Duration })
@@ -514,6 +691,15 @@ func (r *runner) sendData() uint64 {
 	r.res.TxMbit = ptr(float64(sent) * float64(size) * 8 / elapsed / 1e6)
 	r.logf("throughput: sent %d packets (%.2f Mbit/s)", sent, *r.res.TxMbit)
 	return sent
+}
+
+// headerBytes is what each Data packet costs on the wire beyond its payload:
+// IPv4 + UDP, plus the Noise header and tag in direct mode.
+func (r *runner) headerBytes() int64 {
+	if r.hopper != nil {
+		return ipUDPHeader + direct.Overhead
+	}
+	return ipUDPHeader
 }
 
 func (r *runner) recordRx(peerSent int64) {
@@ -528,9 +714,108 @@ func (r *runner) recordRx(peerSent int64) {
 		// n packets span n-1 inter-arrival gaps; count n-1 packets' worth.
 		frac := float64(n-1) / float64(n)
 		r.res.RxMbit = ptr(float64(bytes) * frac * 8 / window / 1e6)
-		r.res.RxIPMbit = ptr(float64(bytes+n*ipUDPHeader) * frac * 8 / window / 1e6)
+		r.res.RxIPMbit = ptr(float64(bytes+n*r.headerBytes()) * frac * 8 / window / 1e6)
 		r.logf("throughput: received %d/%d packets, %.2f Mbit/s", n, peerSent, *r.res.RxMbit)
 	}
+}
+
+// startDirect runs steps 3a-c. It returns false (and no error) when the
+// direct channel cannot be used: a NAT changes ports, or the first hop fails.
+// Those are results; errors mean the run itself broke.
+func (r *runner) startDirect() (bool, error) {
+	// 3a. Handshake. a initiates and retransmits until b's reply arrives;
+	// b answers from handle(), on whatever step it is in. The prologue binds
+	// the handshake to this trial's session.
+	prologue := append([]byte("p2ptestbed direct v1"), wire.U64(r.cfg.Session)...)
+	hs, err := direct.NewHandshake(r.cfg.Role == 'a', r.cfg.PSK, prologue)
+	if err != nil {
+		return false, err
+	}
+	r.hs = hs
+	if r.cfg.Role == 'a' {
+		if _, err := hs.Start(); err != nil {
+			return false, err
+		}
+	}
+	timeout := r.cfg.HandshakeTimeout
+	if timeout == 0 {
+		timeout = r.cfg.PunchTimeout
+	}
+	began := time.Since(r.t0)
+	ok := r.pump(timeout, r.cfg.PunchInterval,
+		func() {
+			if r.cfg.Role == 'a' {
+				r.sendTo(r.remote, wire.Handshake, 0, hs.Last())
+			}
+		},
+		hs.Done)
+	if !ok {
+		return false, fmt.Errorf("noise handshake: not done after %v (same -psk on both peers?)", timeout)
+	}
+	r.res.HandshakeMs = ptr(ms(time.Since(r.t0) - began))
+	r.logf("handshake: done in %.1f ms", *r.res.HandshakeMs)
+
+	// 3b. Secured. Hopping needs the public port to equal the local port on
+	// both sides (see direct.Schedule). We know it for our side when STUN
+	// ran: the STUN-mapped port is our local port and the rendezvous saw the
+	// same mapping. Without STUN, assume it does. The barrier value carries
+	// the answer to the peer: 1 = changes ports.
+	keeps := true
+	if r.stunGot.IsValid() {
+		keeps = r.stunGot.Port() == r.conn.LocalAddr().(*net.UDPAddr).AddrPort().Port() &&
+			(r.res.MappingVaries == nil || !*r.res.MappingVaries)
+	}
+	var mine uint64
+	if !keeps {
+		mine = 1
+	}
+	if err := r.barrier(stepSecured, mine, r.cfg.StepTimeout); err != nil {
+		return false, err
+	}
+	peerKeeps := r.peerValue[stepSecured] == 0
+	r.res.KeepsPort, r.res.PeerKeepsPort = ptr(keeps), ptr(peerKeeps)
+	r.res.HopPossible = ptr(keeps && peerKeeps)
+	if !*r.res.HopPossible {
+		if !r.cfg.HopForce {
+			r.logf("hop: not possible (keeps port: us %v, peer %v); the relay would take over", keeps, peerKeeps)
+			return false, nil
+		}
+		r.logf("hop: not possible (keeps port: us %v, peer %v), trying anyway (-hop-force)", keeps, peerKeeps)
+	}
+
+	// 3c. Hopping. Both peers derive the same schedule from the session's
+	// hop key; our local IP is the one the punched socket uses, the peer's
+	// is the one the punch reached.
+	sched := direct.NewSchedule(hs.Session().HopKey(), r.cfg.HopInterval)
+	if r.cfg.ClockOffset != 0 || r.cfg.ClockDriftPPM != 0 {
+		sched.Clock = direct.SkewedClock(r.cfg.ClockOffset, r.cfg.ClockDriftPPM)
+	}
+	local := r.conn.LocalAddr().(*net.UDPAddr).AddrPort().Addr().Unmap()
+	if local.IsUnspecified() {
+		local = netip.Addr{}
+	}
+	r.hopper, err = direct.NewHopper(direct.Config{
+		Session: hs.Session(), Schedule: sched, Role: r.cfg.Role,
+		PeerIP: r.remote.Addr(), LocalIP: local,
+		Lead: r.cfg.HopLead, MinOverlap: r.cfg.HopMinOverlap, MaxOverlap: r.cfg.HopOverlap,
+		DrainIdle: r.cfg.HopDrainIdle,
+		OnPacket:  r.onHop,
+		Logf:      r.cfg.Logf,
+	})
+	if err != nil {
+		return false, err
+	}
+	r.res.Hopping = true
+	r.logf("hop: started, %v", r.hopper)
+
+	// From here on barriers go through the Hopper. This one only passes once
+	// the first hop works in BOTH directions, so it waits for an ack.
+	if err := r.barrierBothWays(stepHopping, r.cfg.StepTimeout); err != nil {
+		r.logf("hop: no contact through the hopper: %v", err)
+		return false, nil
+	}
+	r.res.HopConnected = true
+	return true, nil
 }
 
 // ---------------------------------------------------------------------------

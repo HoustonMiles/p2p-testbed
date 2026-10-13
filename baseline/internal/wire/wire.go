@@ -1,6 +1,8 @@
 // Package wire is the packet format shared by the punch tool and the
 // rendezvous server. It is deliberately plain: no encryption, no
 // authentication, so the baseline measures only what UDP and the NATs cost.
+// The direct channel (package direct) sends the same packets, but encrypted
+// inside its own transport; only its Handshake messages travel in the clear.
 //
 // Every packet starts with the same 24-byte header (big-endian):
 //
@@ -33,6 +35,7 @@ const (
 	Barrier                    // "I have reached step <seq>"; body: a value (e.g. packets sent)
 	BarrierAck                 // reply to a Barrier from a peer that has reached that step too
 	Data                       // throughput test payload (padding)
+	Handshake                  // peer -> peer: a Noise handshake message (direct channel only)
 )
 
 type Packet struct {
@@ -97,3 +100,4 @@ func ParseAddrs(b []byte) (self, peer netip.AddrPort, ok bool) {
 	}
 	return get(b[0:6]), get(b[6:12]), true
 }
+

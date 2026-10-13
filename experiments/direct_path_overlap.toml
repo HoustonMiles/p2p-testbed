@@ -1,0 +1,47 @@
+# =============================================================================
+# Direct path, long overlap: is the extra throughput loss in direct_path
+# caused by the old port closing while packets for it are still queued?
+#
+# direct_path offers 60 Mbit/s into 50 Mbit/s links, so the router queue
+# (QUEUE_PKTS = 1000 packets) stays full: about 1000 x 1253 B x 8 / 50 Mbit/s
+# = 200 ms of queueing delay. At each slot boundary, packets sent to the old
+# port in the last ~(200 ms + one-way delay) are still in that queue, but the
+# receiver closes the old port after -hop-overlap (default: a tenth of the
+# slot, 100 ms). Result in direct_path: rx_loss +8 points, rx_ip_mbit ~45
+# instead of ~49.4, worse with distance.
+#
+# Same configurations as direct_path (same config hashes), only
+# -hop-overlap 400ms: more than 200 ms queue + 75 ms transatlantic one-way
+# delay + jitter. Lead + overlap must stay under the 1 s slot (100 + 400).
+#
+# Expected if the explanation is right: rx_loss and rx_ip_mbit back to the
+# punch_path values. Compare with:
+#   python3 scripts/compare_runs.py results/punch_path/<run> results/direct_path_overlap/<run>
+#
+#   uv run python -m p2prunner run experiments/direct_path_overlap.toml
+# =============================================================================
+
+name = "direct_path_overlap"
+description = "direct_path with a 400 ms hop overlap, to test whether queued packets are lost when the old port closes."
+trial = "command"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 90
+est_trial_s = 16
+cmd_a = "punch -role a -session $seed -quiet -direct -hop-interval 1s -hop-overlap 400ms -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+cmd_b = "punch -role b -session $seed -quiet -direct -hop-interval 1s -hop-overlap 400ms -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+
+[matrix]
+net_profile = ["local", "coast", "transatlantic"]
+uplink_mbit = ["50"]
+downlink_mbit = ["50"]
+
+[[matrix.pairing]]
+name = "realistic"
+nat_a = "port_restricted"
+nat_b = "port_restricted"
+
