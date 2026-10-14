@@ -66,7 +66,7 @@ def summarize(samples: list[float], prefix: str) -> dict:
 
 
 # =============================================================================
-# nat_verify: RFC 5780 behaviour discovery (same check as scripts/verify_nat.sh)
+# nat_verify: RFC 5780 behaviour discovery (also used by `p2prunner verify`)
 # =============================================================================
 # What each NAT type should measure as (RFC 4787 names):
 #   EI = endpoint-independent, AD = address-dependent,
@@ -229,4 +229,5 @@ def command(tb, cfg, params, ctx) -> dict:
 
 
 TRIALS = {"nat_verify": nat_verify, "ping": ping, "command": command}
+
 

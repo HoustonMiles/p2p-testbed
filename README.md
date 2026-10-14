@@ -25,7 +25,7 @@ attackers across NAT types?
 | Carrier-grade NAT (optional, per side) | done | `cgn-a`, `cgn-b` |
 | Link emulation: latency, jitter, loss, uplink/downlink caps | done | netem + IFB on the home routers |
 | STUN server with RFC 5780 support | done | `stun/` (coturn, STUN-only) |
-| Smoke test and NAT verification scripts | done | `scripts/smoke_test.sh`, `scripts/verify_nat.sh` |
+| Smoke test and NAT verification | done | `p2prunner smoke`, `p2prunner verify` (`p2prunner/checks.py`) |
 | Experiment runner (matrix, state reset, resume, metadata) | done | `p2prunner/` |
 | Trial types `nat_verify`, `ping`, `command` | done | `p2prunner/trials.py` |
 | Analysis notebook | done | `analysis/results.ipynb` |
@@ -170,9 +170,9 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 ```bash
 ./scripts/host_setup.sh                 # once per boot (uses sudo)
 docker compose up -d --build --wait     # build (incl. the Go tools) and start
-./scripts/smoke_test.sh                 # sanity check (seconds)
-./scripts/verify_nat.sh                 # RFC 5780 check of the running NAT types (~10 s)
-./scripts/verify_nat.sh --all           # check every NAT type and CGNAT (~1 min)
+uv run python -m p2prunner smoke        # sanity check (seconds)
+uv run python -m p2prunner verify       # RFC 5780 check of the running NAT types (~10 s)
+uv run python -m p2prunner verify --all # check every NAT type and CGNAT (~1 min)
 docker compose down -t 1                # tear down
 ```
 
@@ -217,7 +217,7 @@ A side's public IP is its home router's WAN IP, or its CGN's WAN IP when
 
 All NAT behaviour comes from the Linux kernel (netfilter/conntrack), the same
 code most real home routers run. See `router/configure-router.sh`.
-`scripts/verify_nat.sh` confirms each type with the RFC 5780 tests.
+`p2prunner verify` confirms each type with the RFC 5780 tests.
 
 | Type | Mapping | Inbound allowed from | How |
 |---|---|---|---|
@@ -274,7 +274,13 @@ uv run python -m p2prunner plan experiments/path_baseline.toml   # configuration
 uv run python -m p2prunner run  experiments/path_baseline.toml   # run it
 uv run python -m p2prunner run  experiments/path_baseline.toml --runs 2   # quick test
 uv run python -m p2prunner run --resume results/path_baseline/<time>      # continue after Ctrl+C
+uv run python -m p2prunner smoke                 # testbed wiring check
+uv run python -m p2prunner verify [--all]        # NAT behaviour check
 ```
+
+The smoke test and the NAT verification live in `p2prunner/checks.py`, and
+use the same NAT expectations as the `nat_verify` trial, so the checks and
+the experiments cannot disagree.
 
 For an overnight run, start it inside `tmux` (or `nohup ... &`) so closing the
 terminal doesn't stop it.
@@ -296,7 +302,6 @@ bundle several settings under one name. Matrix keys: `nat_a`, `nat_b`,
 | `hop_matrix_oneway` | The 6 `hop_matrix` pairings with one symmetric side that can still punch (~20 min) |
 | `direct_path` | Experiment B: `punch_path` through the direct channel, realistic pairing x 3 distances (~10 min) |
 | `direct_path_overlap` | `direct_path` with `-hop-overlap 400ms`, the test that found the overlap problem (~10 min) |
-| `example_command` | Template for running your own programs on the peers |
 
 **Trial types:** `nat_verify` (RFC 5780 check), `ping` (RTT from both peers to
 a WAN host), and `command`, which runs `cmd_a`/`cmd_b` on the peers. Each command

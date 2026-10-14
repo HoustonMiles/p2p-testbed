@@ -10,6 +10,10 @@ Command line for the experiment runner.
   uv run python -m p2prunner run --resume results/path_baseline/20261010-010203
       Continue an interrupted run (same experiment, skips finished trials).
 
+  uv run python -m p2prunner smoke
+  uv run python -m p2prunner verify [--all]
+      Check the running testbed (see p2prunner/checks.py).
+
 Trial order: each configuration's trials are split into blocks (block_size
 trials each), and the blocks of ALL configurations are shuffled with the
 experiment's seed. The testbed is recreated only when the configuration
@@ -29,6 +33,7 @@ import time
 import traceback
 from pathlib import Path
 
+from p2prunner import checks
 from p2prunner import experiment as experiment_mod
 from p2prunner.store import ResultStore
 from p2prunner.testbed import Testbed, TestbedError
@@ -260,6 +265,25 @@ def print_summary(store) -> None:
 
 
 # =============================================================================
+# smoke / verify
+# =============================================================================
+def cmd_smoke(args) -> int:
+    tb = Testbed(REPO_ROOT)
+    if problem := checks.preflight(tb):
+        print(problem)
+        return 2
+    return checks.smoke(tb)
+
+
+def cmd_verify(args) -> int:
+    tb = Testbed(REPO_ROOT)
+    if problem := checks.preflight(tb, need_running=not args.all):
+        print(problem)
+        return 2
+    return checks.verify(tb, every_type=args.all)
+
+
+# =============================================================================
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="p2prunner", description="P2P testbed experiment runner")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -276,10 +300,19 @@ def main(argv=None) -> int:
     r.add_argument("--results", default="results", help="results folder (default: results/)")
     r.set_defaults(func=cmd_run)
 
+    s = sub.add_parser("smoke", help="check the running testbed's wiring (seconds)")
+    s.set_defaults(func=cmd_smoke)
+
+    v = sub.add_parser("verify", help="RFC 5780 check of the NAT behaviour")
+    v.add_argument("--all", action="store_true",
+                   help="cycle through every NAT type (as home router and as CGN), then restore")
+    v.set_defaults(func=cmd_verify)
+
     args = parser.parse_args(argv)
     try:
         return args.func(args)
     except (ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
+
 

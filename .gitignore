@@ -6,8 +6,12 @@ __pycache__/
 # or remove this line if you want results in git.
 results/
 
+# Output of runs started with nohup
+*.log
+
 # Local settings copied from .env.example
 .env
 
 # Jupyter autosaves
 .ipynb_checkpoints/
+
