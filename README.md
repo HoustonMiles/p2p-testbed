@@ -35,7 +35,8 @@ attackers across NAT types?
 | Port-hopping: clock-based HKDF port schedule, early open + probing, drain-based close | done, tests pass | `p2p/internal/direct/schedule.go`, `hopper.go` |
 | `punch -direct`: handshake, port check, hopping, then ping + throughput through the hopper | done, tests pass | `p2p/internal/peer/`, `p2p/cmd/punch` |
 | Clock offset/drift flags | done | `punch -clock-offset`, `-clock-drift-ppm` |
-| Result summary scripts (standard library only) | done | `scripts/hop_summary.py`, `scripts/compare_runs.py` |
+| Result reports (standard library only) | done | `p2prunner hops`, `p2prunner compare` (`p2prunner/reports.py`) |
+| Tests: Go unit + fuzz tests beside the code, Python `unittest` in `tests/` | done | see Testing |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
 | **Result:** path baseline | 180/180 trials; RTT within 0.4 ms of target, jitter matches netem theory | `results/path_baseline/20261009-175144` |
 | **Result:** punch matrix (raw baseline) | 320/320 trials; 24/32 configurations punch, exactly as RFC 4787 predicts | `results/punch_matrix/20261012-124540` |
@@ -60,7 +61,7 @@ NAT processing overhead (the testbed's noise floor).
 `hop_matrix` (all 16 pairings x side B on the WAN or behind CGNAT, coast
 profile, 1 s slots, `-hop-force`), with `hop_matrix_oneway` rerunning the 6
 configurations that crashed before the hopping barrier waited for an ack.
-Summarised with `scripts/hop_summary.py`.
+Summarised with `p2prunner hops`.
 
 | Group | Configurations | Result |
 |---|---|---|
@@ -78,7 +79,7 @@ layers keep the source port (see Paper updates: threats to validity).
 
 `direct_path` against `punch_path`, realistic pairing (port-restricted on
 both sides), 50 Mbit/s links, 60 Mbit/s offered per direction, 1 s slots.
-Medians of 10 trials, both sides. Compared with `scripts/compare_runs.py`.
+Medians of 10 trials, both sides. Compared with `p2prunner compare`.
 
 | Profile | RTT p50 raw / direct | rx_ip_mbit raw / direct | rx_mbit raw / direct | rx_loss raw / direct | Handshake |
 |---|---|---|---|---|---|
@@ -442,6 +443,25 @@ counters, all prefixed `hop_`:
 
 `rx_ip_mbit` also counts the 25 bytes Noise adds per packet in direct mode.
 
+## Testing
+
+| What | Where | Run |
+|---|---|---|
+| Go unit tests | `_test.go` files beside the code (`p2p/`) | `cd p2p && go test -race ./...` |
+| Go fuzz tests for everything that parses network input | `fuzz_test.go` in `wire`, `stun`, `direct` | `cd p2p && go test -fuzz=FuzzOpen -fuzztime=1m ./internal/direct` (one fuzz target per run) |
+| Python tests for the runner, checks and reports (fake testbed, no Docker) | `tests/` | `python3 -m unittest` (from the repo root) |
+| The real testbed | | `p2prunner smoke`, `p2prunner verify`, then a short experiment run |
+
+`go test` without `-fuzz` runs each fuzz target on its saved inputs only
+(`testdata/fuzz/`), so the fuzzers' past finds stay as regression tests. The
+Docker build runs `go vet` and `go test` too, so an image never ships code
+that fails its tests. On NixOS without Go installed:
+`nix-shell -p go --run "cd p2p && go test ./..."`.
+
+Fuzz targets: `wire.FuzzParse`, `wire.FuzzParseAddrs`, `stun.FuzzParse`,
+`direct.FuzzOpen` (nothing forged authenticates), `direct.FuzzHandshake`,
+`direct.FuzzReplayWindow` (the ring bitmap against a plain map).
+
 ## Analysis
 
 ```bash
@@ -453,15 +473,15 @@ table, the path-baseline summary and RTT chart, the hole-punching success
 matrix, the punched-path RTT and throughput, and the columns of any other
 `command` experiment.
 
-Two summary scripts need only Python's standard library (no numpy/pandas,
-so no NixOS setup):
+Two reports need only Python's standard library (no numpy/pandas, so no
+NixOS setup):
 
 ```bash
 # Experiment A: hop success per pairing; later runs replace earlier ones per configuration
-python3 scripts/hop_summary.py results/hop_matrix/<run> results/hop_matrix_oneway/<run>
+uv run python -m p2prunner hops results/hop_matrix/<run> results/hop_matrix_oneway/<run>
 
 # any two runs of the same configurations, e.g. Experiment B: raw vs direct
-python3 scripts/compare_runs.py results/punch_path/<run> results/direct_path/<run>
+uv run python -m p2prunner compare results/punch_path/<run> results/direct_path/<run>
 ```
 
 Replace `<run>` with the run's folder name (e.g. `20261012-132335`); typed
@@ -475,4 +495,3 @@ libraries in standard Linux locations. Add `programs.nix-ld.enable = true;` to
 ```bash
 LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH uv run --group analysis jupyter lab analysis/results.ipynb
 ```
-

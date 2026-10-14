@@ -33,9 +33,9 @@ const (
 	Ping                       // body: sender's timestamp (ns), echoed back in the Pong
 	Pong                       // reply to a Ping
 	Barrier                    // "I have reached step <seq>"; body: a value (e.g. packets sent)
-	BarrierAck                 // reply to a Barrier from a peer that has reached that step too
-	Data                       // throughput test payload (padding)
-	Handshake                  // peer -> peer: a Noise handshake message (direct channel only)
+BarrierAck                 // reply to a Barrier from a peer that has reached that step too
+Data                       // throughput test payload (padding)
+Handshake                  // peer -> peer: a Noise handshake message (direct channel only)
 )
 
 type Packet struct {
@@ -55,9 +55,11 @@ func (p Packet) Append(buf []byte) []byte {
 	return append(buf, p.Body...)
 }
 
-// Parse decodes a packet. Body aliases b, so copy it if b is reused.
+// Parse decodes a packet. Body aliases b, so copy it if b is reused. The
+// reserved bytes must be zero, so every accepted packet has exactly one
+// encoding (found by FuzzParse).
 func Parse(b []byte) (Packet, bool) {
-	if len(b) < HeaderLen || string(b[:4]) != Magic {
+	if len(b) < HeaderLen || string(b[:4]) != Magic || b[6] != 0 || b[7] != 0 {
 		return Packet{}, false
 	}
 	return Packet{
@@ -100,4 +102,3 @@ func ParseAddrs(b []byte) (self, peer netip.AddrPort, ok bool) {
 	}
 	return get(b[0:6]), get(b[6:12]), true
 }
-

@@ -14,6 +14,10 @@ Command line for the experiment runner.
   uv run python -m p2prunner verify [--all]
       Check the running testbed (see p2prunner/checks.py).
 
+  uv run python -m p2prunner hops RUN [RERUN ...]
+  uv run python -m p2prunner compare BASE NEW [NEW_RERUN ...]
+      Reports on finished runs (see p2prunner/reports.py).
+
 Trial order: each configuration's trials are split into blocks (block_size
 trials each), and the blocks of ALL configurations are shuffled with the
 experiment's seed. The testbed is recreated only when the configuration
@@ -33,7 +37,7 @@ import time
 import traceback
 from pathlib import Path
 
-from p2prunner import checks
+from p2prunner import checks, reports
 from p2prunner import experiment as experiment_mod
 from p2prunner.store import ResultStore
 from p2prunner.testbed import Testbed, TestbedError
@@ -283,6 +287,14 @@ def cmd_verify(args) -> int:
     return checks.verify(tb, every_type=args.all)
 
 
+def cmd_hops(args) -> int:
+    return reports.hops(args.runs)
+
+
+def cmd_compare(args) -> int:
+    return reports.compare(args.base, args.new)
+
+
 # =============================================================================
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="p2prunner", description="P2P testbed experiment runner")
@@ -308,11 +320,20 @@ def main(argv=None) -> int:
                    help="cycle through every NAT type (as home router and as CGN), then restore")
     v.set_defaults(func=cmd_verify)
 
+    h = sub.add_parser("hops", help="Experiment A: hop success per NAT pairing")
+    h.add_argument("runs", nargs="+", metavar="RUN",
+                   help="results folder; later folders replace the configurations they rerun")
+    h.set_defaults(func=cmd_hops)
+
+    c = sub.add_parser("compare", help="two runs of the same configurations side by side")
+    c.add_argument("base", metavar="BASE", help="results folder of the baseline, e.g. punch_path")
+    c.add_argument("new", nargs="+", metavar="NEW", help="results folder(s) to compare against it")
+    c.set_defaults(func=cmd_compare)
+
     args = parser.parse_args(argv)
     try:
         return args.func(args)
     except (ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
-
 

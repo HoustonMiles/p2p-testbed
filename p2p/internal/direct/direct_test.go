@@ -9,7 +9,7 @@ import (
 )
 
 // handshake runs both sides in memory and returns the two sessions.
-func handshake(t *testing.T, pskA, pskB []byte) (a, b *Session, err error) {
+func handshake(t testing.TB, pskA, pskB []byte) (a, b *Session, err error) {
 	t.Helper()
 	ha, err := NewHandshake(true, pskA, []byte("trial 1"))
 	if err != nil {
@@ -267,7 +267,7 @@ func hopperRun(t *testing.T, offset, interval, lead, minOverlap, maxOverlap time
 			Session: sess, Schedule: s, Role: role, PeerIP: lo, LocalIP: lo,
 			Lead: lead, MinOverlap: minOverlap, MaxOverlap: maxOverlap,
 			OnPacket: func(Inbound) { got.Add(1) },
-			Logf:     t.Logf,
+				    Logf:     t.Logf,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -307,4 +307,3 @@ func hopperRun(t *testing.T, offset, interval, lead, minOverlap, maxOverlap time
 	}
 	return sa, sb
 }
-
