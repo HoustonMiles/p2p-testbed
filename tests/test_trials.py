@@ -25,6 +25,35 @@ class ExpectedBehaviourTest(unittest.TestCase):
         self.assertEqual(trials.expected_behaviour(cfg, "a"), ("EI", "APD"))
 
 
+class PingTrialTest(unittest.TestCase):
+    """Pings from both peers; the first replies are warm-up and not counted."""
+
+    def ping_output(self, seqs):
+        return "".join(f"64 bytes from 203.0.113.100: icmp_seq={s} ttl=63 time={10 + s}.0 ms\n" for s in seqs)
+
+    def test_warmup_and_loss(self):
+        outputs = {"peer-a": self.ping_output(range(1, 11)),          # all 10 replies
+                   "peer-b": self.ping_output([1, 2, 3, 5, 6, 7, 8])}  # 4, 9, 10 lost
+
+        class Peers:
+            def exec(self, service, cmd, timeout=0):
+                return Done(outputs[service])
+
+            def parallel(self, jobs):
+                return {k: f() for k, f in jobs.items()}
+
+        (cfg,) = expand_matrix({"net_profile": ["local"]})
+        ctx = TrialContext(trial=0, seed=1)
+        m = trials.ping(Peers(), cfg, {"count": 10, "warmup": 2, "interval_s": 0.1}, ctx)
+        self.assertTrue(m["ok"])
+        self.assertEqual((m["pings_sent"], m["warmup"]), (10, 2))
+        self.assertEqual(m["a_rtt_ms_min"], 13.0)             # seq 1-2 are warm-up
+        self.assertEqual(m["a_loss"], 0.0)
+        self.assertAlmostEqual(m["b_loss"], 1 - 5 / 8)        # 5 of 8 after warm-up
+        self.assertEqual(m["b_pings_received"], 7)
+        self.assertEqual(len(ctx.raw["rtt_ms_peer-a"]), 10)  # raw keeps every sample
+
+
 class CommandTrialTest(unittest.TestCase):
     """The command trial reads one JSON object from each peer's last line."""
 

@@ -124,14 +124,26 @@ def nat_verify(tb, cfg, params, ctx) -> dict:
 PING_LINE = re.compile(r"icmp_seq=(\d+).*?time=([\d.]+) ms")
 
 
-def ping_once(tb, source, target, count, interval, warmup, raw) -> dict:
-    result = tb.exec(source, ["ping", "-n", "-c", str(count), "-i", str(interval),
-                              "-W", "2", target], timeout=count * interval + 30)
+@dataclass
+class PingPlan:
+    target: str
+    count: int
+    interval: float
+    warmup: int  # the first replies, discarded (e.g. ARP lookups)
+
+    @classmethod
+    def from_params(cls, params: dict) -> "PingPlan":
+        return cls(target=params.get("target", STUN_IP), count=int(params.get("count", 50)),
+                   interval=float(params.get("interval_s", 0.2)), warmup=int(params.get("warmup", 5)))
+
+
+def ping_once(tb, source: str, plan: PingPlan, raw: dict) -> dict:
+    result = tb.exec(source, ["ping", "-n", "-c", str(plan.count), "-i", str(plan.interval),
+                              "-W", "2", plan.target], timeout=plan.count * plan.interval + 30)
     replies = {int(seq): float(ms) for seq, ms in PING_LINE.findall(result.stdout)}
     raw[f"rtt_ms_{source}"] = [replies[s] for s in sorted(replies)]
-    # Keep the samples in sequence order, minus the warm-up ones.
-    samples = [replies[s] for s in sorted(replies) if s > warmup]
-    sent_after_warmup = max(count - warmup, 0)
+    samples = [replies[s] for s in sorted(replies) if s > plan.warmup]
+    sent_after_warmup = max(plan.count - plan.warmup, 0)
     return {
         "pings_received": len(replies),
         "loss": 1 - len(samples) / sent_after_warmup if sent_after_warmup else None,
@@ -155,16 +167,9 @@ def ping(tb, cfg, params, ctx) -> dict:
       warmup     first N replies to discard    (default 5; e.g. ARP lookups)
     """
     sources = params.get("sources", ["peer-a", "peer-b"])
-    target = params.get("target", STUN_IP)
-    count = int(params.get("count", 50))
-    interval = float(params.get("interval_s", 0.2))
-    warmup = int(params.get("warmup", 5))
-
-    results = tb.parallel({
-        src: (lambda src=src: ping_once(tb, src, target, count, interval, warmup, ctx.raw))
-        for src in sources
-    })
-    metrics = {"target": target, "pings_sent": count, "warmup": warmup}
+    plan = PingPlan.from_params(params)
+    results = tb.parallel({src: (lambda src=src: ping_once(tb, src, plan, ctx.raw)) for src in sources})
+    metrics = {"target": plan.target, "pings_sent": plan.count, "warmup": plan.warmup}
     for src, res in results.items():
         side = src.removeprefix("peer-")          # "peer-a" -> "a"
         metrics.update({f"{side}_{k}": v for k, v in res.items()})
@@ -190,44 +195,54 @@ def command(tb, cfg, params, ctx) -> dict:
     Its keys become result columns, prefixed with a_ or b_. The trial is ok
     if every command exits with status 0 and prints valid JSON.
     """
-    timeout = float(params.get("timeout_s", 60))
-    values = {k: v for k, v in params.items() if not isinstance(v, (dict, list))}
-    values.update(seed=ctx.seed, trial=ctx.trial)
-
-    jobs = {}
-    for side in "ab":
-        template = params.get(f"cmd_{side}")
-        if template:
-            cmd = Template(template).safe_substitute(values)
-            jobs[side] = (lambda side=side, cmd=cmd: tb.sh(f"peer-{side}", cmd, timeout=timeout))
-    if not jobs:
-        raise ValueError("command trial needs cmd_a and/or cmd_b in [params]")
-
-    results = tb.parallel(jobs)
+    results = tb.parallel(command_jobs(tb, params, ctx))
     metrics, ok = {}, True
     for side, res in results.items():
-        ctx.raw[f"stdout_{side}"] = res.stdout[-20000:]
-        ctx.raw[f"stderr_{side}"] = res.stderr[-5000:]
-        metrics[f"{side}_exit"] = res.returncode
-        lines = [line for line in res.stdout.splitlines() if line.strip()]
-        try:
-            data = json.loads(lines[-1]) if lines else None
-        except json.JSONDecodeError:
-            data = None
-        if not isinstance(data, dict):
-            ok = False
-            metrics[f"{side}_error"] = "no JSON object on the last line of output"
-            continue
-        for key, value in data.items():
-            if isinstance(value, (list, dict)):       # keep big values out of the table
-                ctx.raw[f"{side}_{key}"] = value
-            else:
-                metrics[f"{side}_{key}"] = value
-        ok &= res.returncode == 0
+        side_ok = read_side(side, res, metrics, ctx.raw)
+        ok = ok and side_ok
     metrics["ok"] = ok
     return metrics
 
 
-TRIALS = {"nat_verify": nat_verify, "ping": ping, "command": command}
+def command_jobs(tb, params: dict, ctx: TrialContext) -> dict:
+    """One job per side that has a command, with placeholders filled in."""
+    timeout = float(params.get("timeout_s", 60))
+    values = {k: v for k, v in params.items() if not isinstance(v, (dict, list))}
+    values.update(seed=ctx.seed, trial=ctx.trial)
+    jobs = {}
+    for side in "ab":
+        if template := params.get(f"cmd_{side}"):
+            cmd = Template(template).safe_substitute(values)
+            jobs[side] = (lambda side=side, cmd=cmd: tb.sh(f"peer-{side}", cmd, timeout=timeout))
+    if not jobs:
+        raise ValueError("command trial needs cmd_a and/or cmd_b in [params]")
+    return jobs
 
+
+def read_side(side: str, res, metrics: dict, raw: dict) -> bool:
+    """Adds one side's JSON result to metrics (lists and objects go to raw,
+    keeping the table flat). Returns whether that side succeeded."""
+    raw[f"stdout_{side}"] = res.stdout[-20000:]
+    raw[f"stderr_{side}"] = res.stderr[-5000:]
+    metrics[f"{side}_exit"] = res.returncode
+    data = last_json(res.stdout)
+    if data is None:
+        metrics[f"{side}_error"] = "no JSON object on the last line of output"
+        return False
+    for key, value in data.items():
+        target = raw if isinstance(value, (list, dict)) else metrics
+        target[f"{side}_{key}"] = value
+    return res.returncode == 0
+
+
+def last_json(stdout: str) -> dict | None:
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    try:
+        data = json.loads(lines[-1]) if lines else None
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+TRIALS = {"nat_verify": nat_verify, "ping": ping, "command": command}
 

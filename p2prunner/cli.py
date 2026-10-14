@@ -35,6 +35,7 @@ import random
 import sys
 import time
 import traceback
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from p2prunner import checks, reports
@@ -110,97 +111,129 @@ def cmd_plan(args) -> int:
 # =============================================================================
 # run
 # =============================================================================
+@dataclass
+class Run:
+    """One run of an experiment and the state shared by its steps."""
+    tb: Testbed
+    exp: experiment_mod.Experiment
+    store: ResultStore
+    done: set                      # (config_id, trial) already recorded
+    trial_fn: callable
+    remaining: int = 0
+    finished: int = 0
+    failures_in_a_row: int = 0
+    current: int | None = None     # index of the configuration the testbed is running
+    started: float = field(default_factory=time.monotonic)
+
+
 def cmd_run(args) -> int:
     tb = Testbed(REPO_ROOT)
-
-    if args.resume:
-        store = ResultStore(Path(args.resume))
-        exp = experiment_mod.load(store.dir / "experiment.toml")
-        exp.runs = json.loads((store.dir / "meta.json").read_text())["runs"]
-        done = store.done()
-        print(f"Resuming {store.dir} ({len(done)} trials already done)")
-    else:
-        if not args.experiment:
-            print("Give an experiment file, or --resume <results folder>.")
-            return 2
-        exp = experiment_mod.load(args.experiment)
-        if args.runs:
-            exp.runs = args.runs
-        meta = {
-            "experiment": exp.name, "trial_type": exp.trial, "runs": exp.runs,
-            "seed": exp.seed, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "host": platform.node(), "python": platform.python_version(),
-            **tb.versions(),
-        }
-        if meta["git_dirty"]:
-            print("Note: the repository has uncommitted changes; meta.json records this.")
-        # meta.json records the runs actually used (including a --runs override);
-        # --resume reads it back from there.
-        store = ResultStore.create(REPO_ROOT / args.results, exp.name, exp.source_text, meta)
-        done = set()
-        print(f"Results: {store.dir}")
-
+    opened = resume_run(args) if args.resume else new_run(args, tb)
+    if opened is None:
+        return 2
+    exp, store, done = opened
     trial_fn = TRIALS.get(exp.trial)
     if trial_fn is None:
         print(f"Unknown trial type '{exp.trial}'. Known: {', '.join(TRIALS)}")
         return 2
-
-    schedule = build_schedule(exp)
-    remaining = sum(1 for ci, ts in schedule for t in ts
-                    if (exp.configs[ci].id, t) not in done)
-    print(f"{len(exp.configs)} configurations, {remaining} trials to run. "
+    run = Run(tb, exp, store, done, trial_fn)
+    run.remaining = sum(1 for ci, ts in build_schedule(exp) for t in ts
+                        if (exp.configs[ci].id, t) not in done)
+    print(f"{len(exp.configs)} configurations, {run.remaining} trials to run. "
           f"Ctrl+C stops safely; resume with --resume {store.dir}\n")
-
-    current = None          # index of the configuration the testbed is running
-    finished = 0
-    t_run = time.monotonic()
-    failures_in_a_row = 0
-
     try:
-        for ci, trials in schedule:
-            cfg = exp.configs[ci]
-            todo = [t for t in trials if (cfg.id, t) not in done]
-            if not todo:
-                continue
-
-            # --- bring up this configuration if it isn't already running ---
-            if current != ci:
-                if not start_config(tb, exp, cfg, store):
-                    current = None
-                    for t in todo:   # record the skipped trials so they're visible
-                        store.add_trial({**base_row(exp, cfg, t), "ok": False,
-                                         "error": "configuration failed to start or verify"})
-                    finished += len(todo)
-                    continue
-                current = ci
-
-            # --- run the block's trials ---
-            for t in todo:
-                row = run_trial(tb, exp, cfg, t, trial_fn, store)
-                finished += 1
-                failures_in_a_row = 0 if row["ok"] else failures_in_a_row + 1
-                elapsed = time.monotonic() - t_run
-                eta = elapsed / finished * (remaining - finished)
-                status = "ok  " if row["ok"] else "FAIL"
-                print(f"[{finished}/{remaining}] {status} {cfg.id} trial {t:>4}  "
-                      f"({row['duration_s']:.1f}s)  ETA {fmt_duration(eta)}"
-                      + (f"  error: {row['error']}" if row.get("error") else ""))
-                if row.get("testbed_error"):
-                    current = None   # recreate the testbed before the next trial
-                if failures_in_a_row >= 20:
-                    print("\n20 failures in a row; stopping so you can check the testbed.")
-                    return 1
+        if not run_schedule(run):
+            return 1
     except KeyboardInterrupt:
         print(f"\nStopped. Continue later with:\n"
               f"  uv run python -m p2prunner run --resume {store.dir}")
         return 130
-
-    csv_path = store.write_csv()
-    print_summary(store)
-    print(f"\nDone in {fmt_duration(time.monotonic() - t_run)}. Results: {store.dir}\n"
-          f"  {store.trials_path.name}  (pandas: pd.read_json(path, lines=True))\n"
-          f"  {csv_path.name}")
+    finish(run)
     return 0
+
+
+def resume_run(args):
+    store = ResultStore(Path(args.resume))
+    exp = experiment_mod.load(store.dir / "experiment.toml")
+    exp.runs = json.loads((store.dir / "meta.json").read_text())["runs"]
+    done = store.done()
+    print(f"Resuming {store.dir} ({len(done)} trials already done)")
+    return exp, store, done
+
+
+def new_run(args, tb):
+    if not args.experiment:
+        print("Give an experiment file, or --resume <results folder>.")
+        return None
+    exp = experiment_mod.load(args.experiment)
+    if args.runs:
+        exp.runs = args.runs
+    # meta.json records the runs actually used (including a --runs
+    # override); --resume reads it back from there.
+    meta = {
+        "experiment": exp.name, "trial_type": exp.trial, "runs": exp.runs,
+        "seed": exp.seed, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "host": platform.node(), "python": platform.python_version(),
+        **tb.versions(),
+    }
+    if meta["git_dirty"]:
+        print("Note: the repository has uncommitted changes; meta.json records this.")
+    store = ResultStore.create(REPO_ROOT / args.results, exp.name, exp.source_text, meta)
+    print(f"Results: {store.dir}")
+    return exp, store, set()
+
+
+def run_schedule(run: Run) -> bool:
+    """Runs every block not yet done. False: stopped after 20 failures in a row."""
+    for ci, trials in build_schedule(run.exp):
+        cfg = run.exp.configs[ci]
+        todo = [t for t in trials if (cfg.id, t) not in run.done]
+        if not todo:
+            continue
+        if run.current != ci and not switch_config(run, cfg, todo):
+            continue
+        for t in todo:
+            if not record_trial(run, cfg, t):
+                print("\n20 failures in a row; stopping so you can check the testbed.")
+                return False
+    return True
+
+
+def switch_config(run: Run, cfg, todo: list[int]) -> bool:
+    """Brings up cfg. If it will not start, records its trials as failed."""
+    if start_config(run, cfg):
+        run.current = cfg.index
+        return True
+    run.current = None
+    for t in todo:  # recorded, so the skipped trials are visible
+        run.store.add_trial({**base_row(run.exp, cfg, t), "ok": False,
+                             "error": "configuration failed to start or verify"})
+    run.finished += len(todo)
+    return False
+
+
+def record_trial(run: Run, cfg, trial: int) -> bool:
+    """Runs one trial and prints progress. False: 20 failures in a row."""
+    row = run_trial(run, cfg, trial)
+    run.finished += 1
+    run.failures_in_a_row = 0 if row["ok"] else run.failures_in_a_row + 1
+    elapsed = time.monotonic() - run.started
+    eta = elapsed / run.finished * (run.remaining - run.finished)
+    status = "ok  " if row["ok"] else "FAIL"
+    print(f"[{run.finished}/{run.remaining}] {status} {cfg.id} trial {trial:>4}  "
+          f"({row['duration_s']:.1f}s)  ETA {fmt_duration(eta)}"
+          + (f"  error: {row['error']}" if row.get("error") else ""))
+    if row.get("testbed_error"):
+        run.current = None  # recreate the testbed before the next trial
+    return run.failures_in_a_row < 20
+
+
+def finish(run: Run) -> None:
+    csv_path = run.store.write_csv()
+    print_summary(run.store)
+    print(f"\nDone in {fmt_duration(time.monotonic() - run.started)}. Results: {run.store.dir}\n"
+          f"  {run.store.trials_path.name}  (pandas: pd.read_json(path, lines=True))\n"
+          f"  {csv_path.name}")
 
 
 def base_row(exp, cfg, trial: int) -> dict:
@@ -208,42 +241,45 @@ def base_row(exp, cfg, trial: int) -> dict:
             "trial": trial, "seed": trial_seed(exp.seed, cfg.id, trial)}
 
 
-def start_config(tb, exp, cfg, store) -> bool:
-    """Bring up a configuration and (optionally) verify its NAT behaviour.
-    Tries twice before giving up on it."""
+def start_config(run: Run, cfg) -> bool:
+    """Brings up a configuration and, if the experiment asks, verifies its
+    NAT behaviour. Tries twice before giving up on it."""
     for attempt in (1, 2):
         print(f"--- starting {cfg.id}: {cfg.label}" + (" (retry)" if attempt == 2 else ""))
         event = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), **cfg.row(), "attempt": attempt}
-        try:
-            tb.up(cfg.env)
-        except TestbedError as e:
-            store.add_config_event({**event, "started": False, "error": str(e)[-500:]})
-            print(f"    could not start: {str(e).strip().splitlines()[-1]}")
-            continue
-        if exp.verify_nat and exp.trial != "nat_verify":
-            ctx = TrialContext(trial=-1, seed=0)
-            check = nat_verify(tb, cfg, {}, ctx)
-            store.add_config_event({**event, "started": True, "verified": check["ok"], **check})
-            if not check["ok"]:
-                print(f"    NAT verification FAILED: {check}")
-                continue
-            print("    NAT behaviour verified (RFC 5780)")
-        else:
-            store.add_config_event({**event, "started": True})
-        return True
+        if bring_up(run, cfg, event):
+            return True
     print(f"    skipping {cfg.id} for this block")
     return False
 
 
-def run_trial(tb, exp, cfg, trial: int, trial_fn, store) -> dict:
-    row = base_row(exp, cfg, trial)
+def bring_up(run: Run, cfg, event: dict) -> bool:
+    try:
+        run.tb.up(cfg.env)
+    except TestbedError as e:
+        run.store.add_config_event({**event, "started": False, "error": str(e)[-500:]})
+        print(f"    could not start: {str(e).strip().splitlines()[-1]}")
+        return False
+    if not run.exp.verify_nat or run.exp.trial == "nat_verify":
+        run.store.add_config_event({**event, "started": True})
+        return True
+    check = nat_verify(run.tb, cfg, {}, TrialContext(trial=-1, seed=0))
+    run.store.add_config_event({**event, "started": True, "verified": check["ok"], **check})
+    if not check["ok"]:
+        print(f"    NAT verification FAILED: {check}")
+        return False
+    print("    NAT behaviour verified (RFC 5780)")
+    return True
+
+
+def run_trial(run: Run, cfg, trial: int) -> dict:
+    row = base_row(run.exp, cfg, trial)
     ctx = TrialContext(trial=trial, seed=row["seed"])
     row["started"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     t0 = time.monotonic()
     try:
-        tb.reset_state()
-        metrics = trial_fn(tb, cfg, exp.params, ctx)
-        row.update(metrics)
+        run.tb.reset_state()
+        row.update(run.trial_fn(run.tb, cfg, run.exp.params, ctx))
         row.setdefault("ok", True)
     except TestbedError as e:
         row.update(ok=False, error=str(e)[-300:], testbed_error=True)
@@ -251,8 +287,8 @@ def run_trial(tb, exp, cfg, trial: int, trial_fn, store) -> dict:
         row.update(ok=False, error=f"{type(e).__name__}: {e}"[-300:])
         ctx.raw["traceback"] = traceback.format_exc()
     row["duration_s"] = round(time.monotonic() - t0, 3)
-    store.add_trial(row)
-    store.save_raw(cfg.id, trial, ctx.raw)
+    run.store.add_trial(row)
+    run.store.save_raw(cfg.id, trial, ctx.raw)
     return row
 
 
