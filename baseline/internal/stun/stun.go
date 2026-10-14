@@ -72,28 +72,43 @@ func Parse(b []byte, id TxID) (netip.AddrPort, bool) {
 	if end > len(b) {
 		return netip.AddrPort{}, false
 	}
+	return mappedAddress(b[headerLen:end])
+}
+
+// mappedAddress walks the attributes and prefers XOR-MAPPED-ADDRESS over
+// the legacy MAPPED-ADDRESS.
+func mappedAddress(attrs []byte) (netip.AddrPort, bool) {
 	var legacy netip.AddrPort
-	for off := headerLen; off+4 <= end; {
-		typ := binary.BigEndian.Uint16(b[off:])
-		n := int(binary.BigEndian.Uint16(b[off+2:]))
-		val := b[off+4:]
-		if off+4+n > end {
+	for off := 0; off+4 <= len(attrs); {
+		typ := binary.BigEndian.Uint16(attrs[off:])
+		n := int(binary.BigEndian.Uint16(attrs[off+2:]))
+		if off+4+n > len(attrs) {
 			break
 		}
-		// IPv4 address attributes: reserved, family 0x01, port, 4-byte IP.
-		if n >= 8 && val[1] == 0x01 {
-			port := binary.BigEndian.Uint16(val[2:4])
-			ip := binary.BigEndian.Uint32(val[4:8])
+		if a, ok := ipv4Attr(attrs[off+4 : off+4+n]); ok {
 			switch typ {
 			case attrXORMappedAddress:
-				return addr(ip^cookie, port^(cookie>>16)), true
+				return addr(a.ip^cookie, a.port^(cookie>>16)), true
 			case attrMappedAddress:
-				legacy = addr(ip, port)
+				legacy = addr(a.ip, a.port)
 			}
 		}
 		off += 4 + (n+3)&^3 // attributes are padded to 4 bytes
 	}
 	return legacy, legacy.IsValid()
+}
+
+type rawAddr struct {
+	ip   uint32
+	port uint16
+}
+
+// ipv4Attr decodes an address attribute: reserved, family 0x01, port, IP.
+func ipv4Attr(val []byte) (rawAddr, bool) {
+	if len(val) < 8 || val[1] != 0x01 {
+		return rawAddr{}, false
+	}
+	return rawAddr{ip: binary.BigEndian.Uint32(val[4:8]), port: binary.BigEndian.Uint16(val[2:4])}, true
 }
 
 func addr(ip uint32, port uint16) netip.AddrPort {

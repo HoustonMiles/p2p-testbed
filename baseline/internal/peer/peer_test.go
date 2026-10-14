@@ -23,8 +23,8 @@ func TestLoopback(t *testing.T) {
 // throughput direction cross several hops.
 func TestLoopbackDirect(t *testing.T) {
 	results := runPair(t, Config{
-		Direct: true, PSK: bytes.Repeat([]byte{7}, 32),
-		HandshakeTimeout: 2 * time.Second, HopInterval: 150 * time.Millisecond,
+		Direct: &DirectConfig{PSK: bytes.Repeat([]byte{7}, 32),
+			HandshakeTimeout: 2 * time.Second, HopInterval: 150 * time.Millisecond},
 	})
 	checkResults(t, results)
 	for role, r := range results {
@@ -43,12 +43,12 @@ func TestLoopbackDirect(t *testing.T) {
 // With different keys the handshake must fail, and the run report it.
 func TestLoopbackDirectWrongPSK(t *testing.T) {
 	results := runPair(t, Config{
-		Direct: true, PSK: bytes.Repeat([]byte{7}, 32),
-		HandshakeTimeout: 300 * time.Millisecond, HopInterval: 150 * time.Millisecond,
+		Direct: &DirectConfig{PSK: bytes.Repeat([]byte{7}, 32),
+			HandshakeTimeout: 300 * time.Millisecond, HopInterval: 150 * time.Millisecond},
 		StepTimeout: 500 * time.Millisecond,
 	}, func(c *Config) {
 		if c.Role == 'b' {
-			c.PSK = bytes.Repeat([]byte{8}, 32)
+			c.Direct.PSK = bytes.Repeat([]byte{8}, 32)
 		}
 	})
 	for role, r := range results {
@@ -64,11 +64,11 @@ func TestLoopbackDirectWrongPSK(t *testing.T) {
 // alone and failing at a later step.
 func TestLoopbackDirectOneWay(t *testing.T) {
 	results := runPair(t, Config{
-		Direct: true, PSK: bytes.Repeat([]byte{7}, 32),
-		HandshakeTimeout: 2 * time.Second, HopInterval: 150 * time.Millisecond,
+		Direct: &DirectConfig{PSK: bytes.Repeat([]byte{7}, 32),
+			HandshakeTimeout: 2 * time.Second, HopInterval: 150 * time.Millisecond},
 		StepTimeout: 500 * time.Millisecond,
 	}, func(c *Config) {
-		c.dropHopSends = c.Role == 'b'
+		c.Direct.dropHopSends = c.Role == 'b'
 	})
 	for role, r := range results {
 		if r.Error != "" || !r.Hopping || r.HopConnected || r.PingsSent != 0 {
@@ -115,9 +115,10 @@ func runPair(t *testing.T, extra Config, per ...func(*Config)) map[byte]*Result 
 				Pings:       20, PingInterval: 5 * time.Millisecond, PingGrace: 200 * time.Millisecond,
 				RateMbit: 5, Duration: 300 * time.Millisecond, Size: 1000, Drain: 200 * time.Millisecond,
 				Linger: 100 * time.Millisecond, Logf: t.Logf,
-
-				Direct: extra.Direct, PSK: extra.PSK, HandshakeTimeout: extra.HandshakeTimeout,
-				HopInterval: extra.HopInterval,
+			}
+			if extra.Direct != nil {
+				d := *extra.Direct // each peer gets its own copy to adjust
+				c.Direct = &d
 			}
 			if extra.StepTimeout != 0 {
 				c.StepTimeout = extra.StepTimeout

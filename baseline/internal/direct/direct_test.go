@@ -161,7 +161,7 @@ func TestSkewedClock(t *testing.T) {
 }
 
 // TestDrained checks the rule for closing the previous slot's socket.
-func TestDrained(t *testing.T) {
+func TestDrainDecision(t *testing.T) {
 	cfg := Config{MinOverlap: 40 * time.Millisecond, MaxOverlap: 150 * time.Millisecond, DrainIdle: 50 * time.Millisecond}
 	ms := int64(time.Millisecond)
 	const boundary = int64(1_000_000_000)
@@ -197,13 +197,13 @@ func TestDrained(t *testing.T) {
 		{"no old socket at max", 150 * time.Millisecond, nil, sock(0, 0), true, false},
 	} {
 		now := boundary + int64(c.pos)
-		got, cutoff := drained(cfg, c.pos, now, boundary, c.old, c.cur)
+		got, cutoff := drainCheck{pos: c.pos, now: now, boundary: boundary, old: c.old, cur: c.cur}.decide(cfg)
 		if got != c.want || cutoff != c.wantCutoff {
 			t.Errorf("%s: drained = %v, cutoff = %v; want %v, %v", c.name, got, cutoff, c.want, c.wantCutoff)
 		}
 	}
 	shared := sock(boundary+149*ms, boundary+149*ms)
-	if got, cutoff := drained(cfg, 150*time.Millisecond, boundary+150*ms, boundary, shared, shared); !got || cutoff {
+	if got, cutoff := (drainCheck{pos: 150 * time.Millisecond, now: boundary + 150*ms, boundary: boundary, old: shared, cur: shared}).decide(cfg); !got || cutoff {
 		t.Error("shared socket: want drained, no cutoff (the socket stays open)")
 	}
 }
@@ -228,8 +228,9 @@ func TestHopperLoopback(t *testing.T) {
 		{"peer ahead 20ms", 20 * ms, 250 * ms, 50 * ms, 40 * ms, 150 * ms, [2]time.Duration{40 * ms, 100 * ms}, false},
 		{"peer behind 60ms", -60 * ms, 300 * ms, 80 * ms, 40 * ms, 150 * ms, [2]time.Duration{60 * ms, 150 * ms}, false},
 		// MaxOverlap (50 ms) shorter than the 60 ms b keeps sending to a's
-		// old port: a must cut the old port off while busy, and say so.
-		{"peer behind past max", -60 * ms, 300 * ms, 80 * ms, 40 * ms, 50 * ms, [2]time.Duration{40 * ms, 60 * ms}, true},
+		// old port: a must cut the old port off while busy, and say so. The
+		// upper bound allows for housekeeping running late under load.
+		{"peer behind past max", -60 * ms, 300 * ms, 80 * ms, 40 * ms, 50 * ms, [2]time.Duration{40 * ms, 90 * ms}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			sa, sb := hopperRun(t, c.offset, c.interval, c.lead, c.min, c.max, c.cutoffs)

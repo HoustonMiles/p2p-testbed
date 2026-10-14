@@ -1,16 +1,10 @@
-// Package direct is the encrypted, port-hopping direct channel: the path under
-// test, compared against the raw UDP baseline (package peer) and the TURN relay.
+// Package direct is the Port-Hopping Direct Channel: a Noise handshake over
+// the punched socket, then an encrypted UDP transport whose ports follow a
+// schedule derived from the session keys.
 //
-// It has three parts:
-//
-//   - noise.go     Noise handshake (NNpsk0) and the UDP transport built on it
-//   - schedule.go  the shared, clock-based hop schedule (which port, when)
-//   - hopper.go    the sockets: open the next slot's port, probe the peer's,
-//     send and receive on the current one, close the old one
-//
-// The hole punch itself is not here: it is done by package peer as before.
-// The handshake runs over that punched socket, then the Hopper takes over on
-// new ports derived from the handshake's keys.
+//   - noise.go     handshake and transport
+//   - schedule.go  which port each peer uses in each time slot
+//   - hopper.go    the sockets that follow the schedule
 package direct
 
 import (
@@ -28,43 +22,31 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// ---------------------------------------------------------------------------
-// Handshake
-// ---------------------------------------------------------------------------
-
-// Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s. Two messages:
+// NNpsk0: ephemeral keys on both sides give forward secrecy; the PSK keeps
+// the rendezvous server (which hands out the addresses) from sitting in the
+// middle.
 //
-//	-> psk, e
-//	<- e, ee
-//
-// NN alone has no authentication, so the rendezvous server (which forwards
-// the addresses) could sit in the middle. The pre-shared key, given to both
-// peers by the experiment runner, makes the handshake fail for anyone who
-// does not know it. Ephemeral keys on both sides give forward secrecy.
+// TODO(paper §5 Procedures, "Noise static public keys"): the paper uses
+// static keys exchanged at the rendezvous. Add KK (peers already know each
+// other), IK (initiator knows the responder) and XX (first contact) as a
+// selectable pattern, and drop the PSK.
 var suite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.HashBLAKE2s)
 
-// PSKSize is the required pre-shared key length.
 const PSKSize = 32
 
-// Handshake is one side of the Noise handshake. It only builds and checks
-// messages; the caller moves them over the punched socket (for example as the
-// body of a wire packet) and retransmits Last() until the handshake is Done.
-// That keeps the handshake on the same single socket as the punch, which is
-// what the NAT mapping belongs to.
-//
-// Not safe for concurrent use.
+// Handshake builds and checks handshake messages; the caller carries them
+// over the punched socket and retransmits Last() until Done. It is not safe
+// for concurrent use.
 type Handshake struct {
 	hs        *noise.HandshakeState
 	initiator bool
-	first     []byte // responder: the initiator's message, to spot retransmits
-	last      []byte // the last message we sent, for retransmission
+	first     []byte // responder: the initiator's message, to recognise retransmits
+	last      []byte
 	session   *Session
 }
 
-// NewHandshake starts a handshake. Role 'a' is the initiator, 'b' the
-// responder. The prologue is mixed into the handshake hash, so both sides
-// must pass the same bytes; use something that names the trial (e.g. the
-// session id) so a handshake cannot be replayed into another trial.
+// NewHandshake starts one side. Both sides must pass the same prologue; use
+// one that names the trial so a handshake cannot be replayed into another.
 func NewHandshake(initiator bool, psk, prologue []byte) (*Handshake, error) {
 	if len(psk) != PSKSize {
 		return nil, errors.New("direct: psk must be 32 bytes")
@@ -84,7 +66,7 @@ func NewHandshake(initiator bool, psk, prologue []byte) (*Handshake, error) {
 	return &Handshake{hs: hs, initiator: initiator}, nil
 }
 
-// Start returns the initiator's first message. Only the initiator calls it.
+// Start returns the initiator's first message.
 func (h *Handshake) Start() ([]byte, error) {
 	if !h.initiator {
 		return nil, errors.New("direct: only the initiator starts the handshake")
@@ -100,38 +82,45 @@ func (h *Handshake) Start() ([]byte, error) {
 	return msg, nil
 }
 
-// Handle processes one handshake message from the peer and returns the
-// reply to send, if any. An error means the message was not valid (wrong
-// PSK, corrupted, forged); drop it and keep waiting. flynn/noise rolls the
-// state back on a failed read, so a bad message does not spoil the handshake.
-//
-// Duplicates are expected over UDP: a responder that sees the first message
-// again answers with its reply again (the first reply was probably lost), and
-// an initiator ignores repeated replies.
+// Handle processes one message from the peer and returns the reply to send,
+// if any. An error means the message was invalid; drop it and keep waiting
+// (flynn/noise rolls its state back on a failed read).
 func (h *Handshake) Handle(msg []byte) (reply []byte, err error) {
-	if h.session != nil {
-		if !h.initiator && bytes.Equal(msg, h.first) {
-			return h.last, nil
-		}
-		return nil, nil
+	switch {
+	case h.session != nil:
+		return h.handleDuplicate(msg), nil
+	case h.initiator:
+		return nil, h.finishInitiator(msg)
+	default:
+		return h.respond(msg)
 	}
-	if h.initiator {
-		if h.last == nil {
-			return nil, errors.New("direct: Start must be called first")
-		}
-		// <- e, ee: this completes the handshake.
-		_, cs1, cs2, err := h.hs.ReadMessage(nil, msg)
-		if err != nil {
-			return nil, err
-		}
-		h.session, err = newSession(cs1, cs2, true)
-		return nil, err
+}
+
+// handleDuplicate answers a retransmitted first message: our reply was
+// probably lost. Duplicate replies to the initiator need no answer.
+func (h *Handshake) handleDuplicate(msg []byte) []byte {
+	if !h.initiator && bytes.Equal(msg, h.first) {
+		return h.last
 	}
-	// Responder. -> psk, e
+	return nil
+}
+
+func (h *Handshake) finishInitiator(msg []byte) error {
+	if h.last == nil {
+		return errors.New("direct: Start must be called first")
+	}
+	_, cs1, cs2, err := h.hs.ReadMessage(nil, msg)
+	if err != nil {
+		return err
+	}
+	h.session, err = newSession(cs1, cs2, true)
+	return err
+}
+
+func (h *Handshake) respond(msg []byte) ([]byte, error) {
 	if _, _, _, err := h.hs.ReadMessage(nil, msg); err != nil {
 		return nil, err
 	}
-	// <- e, ee: writing our reply completes the handshake on this side.
 	out, cs1, cs2, err := h.hs.WriteMessage(nil, nil)
 	if err != nil {
 		return nil, err
@@ -142,46 +131,33 @@ func (h *Handshake) Handle(msg []byte) (reply []byte, err error) {
 	return out, err
 }
 
-// Last is the message to retransmit while waiting (nil before Start).
+// Last is the message to retransmit while waiting.
 func (h *Handshake) Last() []byte { return h.last }
 
-// Done reports whether the handshake has finished on this side.
-//
-// The responder is done as soon as it sends its reply, before it knows the
-// reply arrived. It learns that from the initiator's first transport packet;
-// until then it must keep answering retransmitted first messages via Handle.
+// Done reports whether this side has finished. The responder finishes when
+// it sends its reply, before knowing it arrived, so it must keep answering
+// retransmits through Handle.
 func (h *Handshake) Done() bool { return h.session != nil }
 
-// Session returns the transport session, or nil until Done.
 func (h *Handshake) Session() *Session { return h.session }
 
-// ---------------------------------------------------------------------------
-// Transport
-// ---------------------------------------------------------------------------
-
-// Packet types. The type is sent in the clear but authenticated (it is part
-// of the associated data), so it cannot be changed in flight.
+// Packet types. The type travels in the clear but is authenticated as part
+// of the associated data.
 const (
-	TypeData  byte = 1 // application payload
-	TypeProbe byte = 2 // opens a NAT pinhole for a hop slot; body: slot (u64), flags (u8)
+	TypeData  byte = 1
+	TypeProbe byte = 2 // body: slot (u64), flags (u8)
 )
 
-// Transport packet layout:
-//
-//	0      1                 9
-//	| type | counter (u64 BE) | ciphertext + 16-byte tag ...
-//
-// The counter is the AEAD nonce, sent explicitly (as in WireGuard) because
-// UDP loses and reorders packets. Noise's own CipherState keeps an implicit
-// counter on each side, which falls out of step after the first lost packet.
+// Transport packet: type (1) | counter (u64, big-endian) | ciphertext + tag.
+// The counter is sent explicitly, as in WireGuard, because Noise's implicit
+// nonces fall out of step after the first lost or reordered datagram.
 const (
 	headerLen = 9
 	tagLen    = 16
-	Overhead  = headerLen + tagLen // bytes added to every payload
+	Overhead  = headerLen + tagLen
 )
 
-// Noise reserves nonce 2^64-1, so it is never used for a packet. We use it
-// once, to derive the hop key (see newSession).
+// Noise reserves nonce 2^64-1; packets never use it, the hop key does.
 const maxCounter = math.MaxUint64 - 1
 
 var (
@@ -191,11 +167,13 @@ var (
 	ErrExhausted = errors.New("direct: nonce space exhausted")
 )
 
-// Session encrypts and decrypts transport packets after the handshake.
-// Seal and Open are safe for concurrent use.
+// Session seals and opens transport packets; safe for concurrent use.
+//
+// TODO(paper §5 Procedures, long sessions): rekey before the counter runs
+// out (Noise REKEY), and rotate the hop key with it.
 type Session struct {
 	send, recv noise.Cipher
-	counter    atomic.Uint64 // next nonce to send
+	counter    atomic.Uint64
 
 	mu     sync.Mutex
 	replay replayWindow
@@ -203,36 +181,35 @@ type Session struct {
 	hopKey []byte
 }
 
-// newSession takes the two cipher states from the handshake. cs1 encrypts
-// initiator -> responder, cs2 responder -> initiator.
+// newSession takes the handshake's cipher states: cs1 encrypts
+// initiator -> responder, cs2 the other way.
 func newSession(cs1, cs2 *noise.CipherState, initiator bool) (*Session, error) {
 	i2r, r2i := cs1.Cipher(), cs2.Cipher()
 	s := &Session{send: i2r, recv: r2i}
 	if !initiator {
 		s.send, s.recv = r2i, i2r
 	}
+	key, err := deriveHopKey(i2r)
+	s.hopKey = key
+	return s, err
+}
 
-	// Hop key: encrypt 32 zero bytes with the initiator->responder key under
-	// the reserved nonce 2^64-1 (the same trick Noise's REKEY uses), then run
-	// the result through HKDF. Both sides hold that key, nobody else does,
-	// and it is fresh for every handshake. Using a separate derivation keeps
-	// the hop schedule independent of the packet encryption keys.
-	//
-	// (The handshake hash, ChannelBinding(), would not do: with NNpsk0 it
-	// depends only on the PSK and public values, not on the DH secret.)
+// deriveHopKey encrypts zeros under the reserved nonce (as Noise's REKEY
+// does) and runs the result through HKDF. Only the two peers hold the
+// cipher key, the result is fresh per handshake, and the hop schedule stays
+// independent of the packet keys. The handshake hash would not do: with
+// NNpsk0 it depends on the PSK and public values only, not the DH secret.
+func deriveHopKey(i2r noise.Cipher) ([]byte, error) {
 	block := i2r.Encrypt(nil, math.MaxUint64, []byte("p2ptestbed hop key"), make([]byte, 32))
-	s.hopKey = make([]byte, 32)
-	if _, err := io.ReadFull(hkdf.New(sha256.New, block, nil, []byte("p2ptestbed hop key v1")), s.hopKey); err != nil {
-		return nil, err
-	}
-	return s, nil
+	key := make([]byte, 32)
+	_, err := io.ReadFull(hkdf.New(sha256.New, block, nil, []byte("p2ptestbed hop key v1")), key)
+	return key, err
 }
 
 // HopKey is the secret both peers derive the hop schedule from.
 func (s *Session) HopKey() []byte { return s.hopKey }
 
-// Seal appends an encrypted packet of type typ carrying payload to dst.
-// dst must not overlap payload.
+// Seal appends an encrypted packet to dst, which must not overlap payload.
 func (s *Session) Seal(dst []byte, typ byte, payload []byte) ([]byte, error) {
 	n := s.counter.Add(1) - 1
 	if n > maxCounter {
@@ -244,79 +221,84 @@ func (s *Session) Seal(dst []byte, typ byte, payload []byte) ([]byte, error) {
 	return s.send.Encrypt(dst, n, dst[start:start+headerLen], payload), nil
 }
 
-// Open authenticates and decrypts pkt, appending the payload to dst (which
-// must not overlap pkt). Forged, corrupted, replayed and too-old packets are
-// rejected with an error; the caller just drops them.
+// Open authenticates and decrypts pkt into dst, which must not overlap pkt.
+// The replay window is checked before decrypting, so replayed floods cost
+// no crypto, and again after, because another reader may have accepted the
+// same counter meanwhile.
 func (s *Session) Open(dst, pkt []byte) (typ byte, payload []byte, err error) {
 	if len(pkt) < Overhead {
 		return 0, nil, ErrShort
 	}
-	typ = pkt[0]
 	n := binary.BigEndian.Uint64(pkt[1:headerLen])
 	if n > maxCounter {
 		return 0, nil, ErrAuth
 	}
-
-	// Cheap replay check first, so replayed floods cost no decryption...
-	s.mu.Lock()
-	ok := s.replay.check(n)
-	s.mu.Unlock()
-	if !ok {
+	if !s.replayOK(n, false) {
 		return 0, nil, ErrReplay
 	}
 	payload, err = s.recv.Decrypt(dst, n, pkt[:headerLen], pkt[headerLen:])
 	if err != nil {
 		return 0, nil, ErrAuth
 	}
-	// ...and the real one after, since another goroutine may have accepted
-	// the same counter while we were decrypting.
+	if !s.replayOK(n, true) {
+		return 0, nil, ErrReplay
+	}
+	return pkt[0], payload, nil
+}
+
+// replayOK checks counter n against the window and, with accept, records it.
+func (s *Session) replayOK(n uint64, accept bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.replay.check(n) {
-		return 0, nil, ErrReplay
+		return false
 	}
-	s.replay.update(n)
-	return typ, payload, nil
+	if accept {
+		s.replay.update(n)
+	}
+	return true
 }
 
-// replayWindow remembers which of the last windowBits counters have been
-// accepted (RFC 6479 style ring bitmap). Packets may arrive in any order
-// within the window; anything older is rejected.
+// replayWindow remembers the last windowBits counters in a ring bitmap
+// (RFC 6479); within the window packets may arrive in any order.
 const windowBits = 2048
 
 type replayWindow struct {
-	next uint64                  // highest accepted counter + 1 (0: none yet)
-	bits [windowBits / 64]uint64 // bit (n % windowBits) set = n accepted
+	next uint64 // highest accepted counter + 1
+	bits [windowBits / 64]uint64
 }
 
 func (w *replayWindow) check(n uint64) bool {
 	if n >= w.next {
-		return true // newer than anything seen
+		return true
 	}
 	if w.next-n > windowBits {
-		return false // fell out of the window
+		return false
 	}
 	i := n % windowBits
 	return w.bits[i/64]&(1<<(i%64)) == 0
 }
 
-// update marks n accepted. Call only after check(n) returned true.
+// update marks n accepted; call only after check(n).
 func (w *replayWindow) update(n uint64) {
 	if n >= w.next {
-		// Moving the window forward: forget the counters that the ring
-		// positions between the old top and n held before.
-		gap := n - w.next + 1
-		if gap >= windowBits {
-			w.bits = [windowBits / 64]uint64{}
-		} else {
-			for c := w.next; c <= n; c++ {
-				i := c % windowBits
-				w.bits[i/64] &^= 1 << (i % 64)
-			}
-		}
-		w.next = n + 1
+		w.advance(n)
 	}
 	i := n % windowBits
 	w.bits[i/64] |= 1 << (i % 64)
+}
+
+// advance moves the window's top to n, clearing the ring positions that
+// held counters now out of the window.
+func (w *replayWindow) advance(n uint64) {
+	if n-w.next+1 >= windowBits {
+		w.bits = [windowBits / 64]uint64{}
+	} else {
+		for c := w.next; c <= n; c++ {
+			i := c % windowBits
+			w.bits[i/64] &^= 1 << (i % 64)
+		}
+	}
+	w.next = n + 1
 }
 
