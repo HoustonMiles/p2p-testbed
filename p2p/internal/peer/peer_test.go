@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"p2ptestbed/baseline/internal/rendezvous"
-	"p2ptestbed/baseline/internal/stun"
+	"p2ptestbed/p2p/internal/rendezvous"
+	"p2ptestbed/p2p/internal/stun"
 )
 
 // End to end on loopback, no NAT: a fake STUN server, the real rendezvous

@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"p2ptestbed/baseline/internal/rendezvous"
+	"p2ptestbed/p2p/internal/rendezvous"
 )
 
 func main() {

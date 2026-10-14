@@ -21,19 +21,19 @@ attackers across NAT types?
 
 | Part | State | Evidence |
 |---|---|---|
-| NAT routers: full cone, restricted, port-restricted, symmetric | done | `router/configure-router.sh` |
+| NAT routers: full cone, restricted, port-restricted, symmetric | done | `testbed/router/configure-router.sh` |
 | Carrier-grade NAT (optional, per side) | done | `cgn-a`, `cgn-b` |
 | Link emulation: latency, jitter, loss, uplink/downlink caps | done | netem + IFB on the home routers |
-| STUN server with RFC 5780 support | done | `stun/` (coturn, STUN-only) |
+| STUN server with RFC 5780 support | done | `testbed/stun/` (coturn, STUN-only) |
 | Smoke test and NAT verification | done | `p2prunner smoke`, `p2prunner verify` (`p2prunner/checks.py`) |
 | Experiment runner (matrix, state reset, resume, metadata) | done | `p2prunner/` |
 | Trial types `nat_verify`, `ping`, `command` | done | `p2prunner/trials.py` |
 | Analysis notebook | done | `analysis/results.ipynb` |
-| Raw UDP hole-punching baseline (STUN, rendezvous, punch, peer-to-peer RTT, throughput) | done, tests pass | `baseline/` (`punch`, `rendezvous`) |
+| Raw UDP hole-punching baseline (STUN, rendezvous, punch, peer-to-peer RTT, throughput) | done, tests pass | `p2p/` (`punch`, `rendezvous`) |
 | Rendezvous server in the testbed | done | `rendezvous` service, 203.0.113.101:7000 |
-| Direct channel: Noise handshake (NNpsk0), encrypted UDP transport with replay window | done, tests pass | `baseline/internal/direct/noise.go` |
-| Port-hopping: clock-based HKDF port schedule, early open + probing, drain-based close | done, tests pass | `baseline/internal/direct/schedule.go`, `hopper.go` |
-| `punch -direct`: handshake, port check, hopping, then ping + throughput through the hopper | done, tests pass | `baseline/internal/peer/`, `baseline/cmd/punch` |
+| Direct channel: Noise handshake (NNpsk0), encrypted UDP transport with replay window | done, tests pass | `p2p/internal/direct/noise.go` |
+| Port-hopping: clock-based HKDF port schedule, early open + probing, drain-based close | done, tests pass | `p2p/internal/direct/schedule.go`, `hopper.go` |
+| `punch -direct`: handshake, port check, hopping, then ping + throughput through the hopper | done, tests pass | `p2p/internal/peer/`, `p2p/cmd/punch` |
 | Clock offset/drift flags | done | `punch -clock-offset`, `-clock-drift-ppm` |
 | Result summary scripts (standard library only) | done | `scripts/hop_summary.py`, `scripts/compare_runs.py` |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
@@ -216,7 +216,7 @@ A side's public IP is its home router's WAN IP, or its CGN's WAN IP when
 ## How the NAT types are built
 
 All NAT behaviour comes from the Linux kernel (netfilter/conntrack), the same
-code most real home routers run. See `router/configure-router.sh`.
+code most real home routers run. See `testbed/router/configure-router.sh`.
 `p2prunner verify` confirms each type with the RFC 5780 tests.
 
 | Type | Mapping | Inbound allowed from | How |
@@ -329,8 +329,8 @@ prints one JSON object on its last line, and its keys become result columns
 
 ## Raw UDP hole-punching baseline
 
-`baseline/` is a Go module with two programs, compiled into the peer image
-(`host/Dockerfile` runs `go vet` and `go test` during the build):
+`p2p/` is a Go module with two programs, compiled into the peer image
+(`testbed/host/Dockerfile` runs `go vet` and `go test` during the build):
 
 - `rendezvous` runs as the `rendezvous` service and introduces the two peers
   of each session to each other. It never relays their traffic.
@@ -384,7 +384,7 @@ and those pairings need the relay.
 
 `punch -direct` runs the same steps and reports the same columns as the raw
 baseline, but after the punch it moves to the encrypted, port-hopping
-channel in `baseline/internal/direct/`:
+channel in `p2p/internal/direct/`:
 
 - `noise.go`: Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s handshake over the
   punched socket (the pre-shared key stops a man in the middle at the

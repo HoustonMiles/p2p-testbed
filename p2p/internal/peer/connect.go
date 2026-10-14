@@ -7,8 +7,8 @@ import (
 	"net/netip"
 	"time"
 
-	"p2ptestbed/baseline/internal/stun"
-	"p2ptestbed/baseline/internal/wire"
+	"p2ptestbed/p2p/internal/stun"
+	"p2ptestbed/p2p/internal/wire"
 )
 
 // connect runs steps 1-3 and the barrier after them. It returns false

@@ -26,9 +26,9 @@ import (
 	"sync"
 	"time"
 
-	"p2ptestbed/baseline/internal/direct"
-	"p2ptestbed/baseline/internal/stun"
-	"p2ptestbed/baseline/internal/wire"
+	"p2ptestbed/p2p/internal/direct"
+	"p2ptestbed/p2p/internal/stun"
+	"p2ptestbed/p2p/internal/wire"
 )
 
 type Config struct {

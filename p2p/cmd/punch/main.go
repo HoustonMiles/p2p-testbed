@@ -20,7 +20,7 @@ import (
 	"os"
 	"time"
 
-	"p2ptestbed/baseline/internal/peer"
+	"p2ptestbed/p2p/internal/peer"
 )
 
 func main() {

@@ -3,14 +3,14 @@
 # (the rendezvous server).
 #
 # Built from the REPOSITORY ROOT (see docker-compose.yml), so the Go code in
-# baseline/ can be compiled in the first stage. .dockerignore keeps results/,
+# p2p/ can be compiled in the first stage. .dockerignore keeps results/,
 # .venv/ and other large folders out of the build.
 # =============================================================================
 
 # --- Stage 1: compile the Go tools -------------------------------------------
 FROM golang:1.24-alpine AS gobuild
 WORKDIR /src
-COPY baseline/ ./
+COPY p2p/ ./
 # CGO_ENABLED=0 gives static binaries that run on plain Alpine.
 # go vet + go test run here, so an image never ships code that fails its tests.
 RUN CGO_ENABLED=0 go vet ./... \
@@ -30,7 +30,7 @@ RUN apk add --no-cache bash coturn iproute2 iputils socat tcpdump
 # The raw UDP hole-punching baseline (peers) and its rendezvous server.
 COPY --from=gobuild /out/punch /out/rendezvous /usr/local/bin/
 
-COPY host/configure-host.sh /usr/local/bin/configure-host.sh
+COPY testbed/host/configure-host.sh /usr/local/bin/configure-host.sh
 RUN chmod +x /usr/local/bin/configure-host.sh
 
 # Set up routing first, then run the container's command.

@@ -1,7 +1,7 @@
 # =============================================================================
 # Punch matrix: which NAT pairings can open a DIRECT path at all?
 #
-# Runs the raw UDP hole-punching baseline (baseline/cmd/punch) on both peers
+# Runs the raw UDP hole-punching baseline (p2p/cmd/punch) on both peers
 # for all 16 home-router pairings, with side B on the public internet and
 # behind CGNAT. No encryption, no port-hopping: this is the traversal
 # baseline that the Noise channel and the relay are compared against.

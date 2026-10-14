@@ -1,4 +1,4 @@
-module p2ptestbed/baseline
+module p2ptestbed/p2p
 
 go 1.22
 

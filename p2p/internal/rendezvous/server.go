@@ -15,7 +15,7 @@ import (
 	"net/netip"
 	"time"
 
-	"p2ptestbed/baseline/internal/wire"
+	"p2ptestbed/p2p/internal/wire"
 )
 
 type entry struct {

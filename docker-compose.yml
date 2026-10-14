@@ -19,7 +19,7 @@
 
 # --- Shared settings (YAML anchors, merged into services below) ---
 x-router: &router
-  build: ./router
+  build: ./testbed/router
   image: p2p-testbed/router
   init: true                      # tini as PID 1, so containers stop instantly
   cap_add: [NET_ADMIN]            # needed for iptables, routes and tc
@@ -37,9 +37,9 @@ x-router: &router
     retries: 30
 
 x-host: &host
-  # Built from the repository root so the Go tools in baseline/ can be
-  # compiled into the image (see host/Dockerfile and .dockerignore).
-  build: { context: ., dockerfile: host/Dockerfile }
+  # Built from the repository root so the Go tools in p2p/ can be
+  # compiled into the image (see testbed/host/Dockerfile and .dockerignore).
+  build: { context: ., dockerfile: testbed/host/Dockerfile }
   image: p2p-testbed/host
   init: true
   cap_add: [NET_ADMIN]            # needed to replace the default route
@@ -154,7 +154,7 @@ services:
   # UDP 3478 and supports the RFC 5780 NAT behaviour tests, which need a
   # second IP (203.0.113.103, added by start-stun.sh) and a second port (3479).
   stun:
-    build: ./stun
+    build: ./testbed/stun
     image: p2p-testbed/stun
     init: true
     cap_add: [NET_ADMIN]            # needed to add the second IP address
@@ -171,7 +171,7 @@ services:
       retries: 30
 
   # rendezvous: introduces the two peers of a hole-punching trial to each
-  # other (baseline/cmd/rendezvous). It only sees each peer's public address
+  # other (p2p/cmd/rendezvous). It only sees each peer's public address
   # and never relays peer traffic. Uses the host image, which contains the
   # rendezvous binary.
   rendezvous:
