@@ -130,6 +130,7 @@ type Result struct {
 	Direct        bool     `json:"direct"`
 	Noise         string   `json:"noise"`
 	PeerKeyFrom   string   `json:"peer_key_from"`
+	Initiator     *bool    `json:"initiator"` // this side started the handshake (the lower static key)
 	HandshakeMs   *float64 `json:"handshake_ms"`
 	KeepsPort     *bool    `json:"keeps_port"` // STUN-mapped port == local port
 	PeerKeepsPort *bool    `json:"peer_keeps_port"`

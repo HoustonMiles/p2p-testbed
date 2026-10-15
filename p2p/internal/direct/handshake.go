@@ -169,6 +169,8 @@ func (h *Handshake) Last() []byte { return h.last }
 // repeats through Handle.
 func (h *Handshake) Done() bool { return h.session != nil }
 
+func (h *Handshake) Initiator() bool { return h.cfg.Initiator }
+
 // Failed is the reason this side gave up, or nil.
 func (h *Handshake) Failed() error { return h.failed }
 

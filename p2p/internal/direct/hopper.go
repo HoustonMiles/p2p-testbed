@@ -36,8 +36,8 @@ import (
 // ground truth, so attacker prediction accuracy and time to retarget can be
 // scored against it.
 type Hopper struct {
-	cfg      Config
-	peerRole byte
+	cfg            Config
+	side, peerSide byte // from the handshake; see Schedule.Port
 
 	mu    sync.Mutex
 	socks map[uint16]*hopSocket // by local port; consecutive slots may share one
@@ -90,13 +90,13 @@ func NewHopper(cfg Config) (*Hopper, error) {
 		return nil, err
 	}
 	h := &Hopper{
-		cfg:      cfg,
-		peerRole: 'a' + 'b' - cfg.Role,
-		socks:    map[uint16]*hopSocket{},
-		slots:    map[uint64]*slotState{},
-		done:     make(chan struct{}),
-		first:    cfg.Schedule.SlotAt(cfg.Schedule.Now()),
+		cfg:   cfg,
+		socks: map[uint16]*hopSocket{},
+		slots: map[uint64]*slotState{},
+		done:  make(chan struct{}),
+		first: cfg.Schedule.SlotAt(cfg.Schedule.Now()),
 	}
+	h.side, h.peerSide = cfg.Session.sides()
 	h.step()
 	h.wg.Add(1)
 	go h.loop()
@@ -142,7 +142,7 @@ func (h *Hopper) currentSlot() *slotState {
 func (h *Hopper) Current() (slot uint64, local, peer uint16) {
 	s := h.cfg.Schedule
 	slot = s.SlotAt(s.Now())
-	return slot, s.Port(h.cfg.Role, slot), s.Port(h.peerRole, slot)
+	return slot, s.Port(h.side, slot), s.Port(h.peerSide, slot)
 }
 
 // Close stops hopping and closes every socket. Slots still open are not
@@ -173,8 +173,8 @@ func (h *Hopper) closed() bool {
 // openSlot binds our port for slot. Called with h.mu held.
 func (h *Hopper) openSlot(slot uint64) *slotState {
 	s := h.cfg.Schedule
-	st := &slotState{peerPort: s.Port(h.peerRole, slot)}
-	st.sock = h.socket(s.Port(h.cfg.Role, slot))
+	st := &slotState{peerPort: s.Port(h.peerSide, slot)}
+	st.sock = h.socket(s.Port(h.side, slot))
 	h.slots[slot] = st
 	return st
 }
@@ -207,12 +207,11 @@ func (h *Hopper) socket(port uint16) *hopSocket {
 
 func (h *Hopper) logf(format string, args ...any) {
 	if h.cfg.Logf != nil {
-		h.cfg.Logf("[%c] "+format, append([]any{h.cfg.Role}, args...)...)
+		h.cfg.Logf(format, args...)
 	}
 }
 
 func (h *Hopper) String() string {
 	slot, local, peer := h.Current()
-	return fmt.Sprintf("hopper[%c slot=%d local=%d peer=%v:%d]", h.cfg.Role, slot, local, h.cfg.PeerIP, peer)
+	return fmt.Sprintf("hopper[%c slot=%d local=%d peer=%v:%d]", h.side, slot, local, h.cfg.PeerIP, peer)
 }
-

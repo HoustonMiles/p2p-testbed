@@ -59,14 +59,15 @@ type Session struct {
 	mu     sync.Mutex
 	replay replayWindow
 
-	hopKey []byte
+	hopKey    []byte
+	initiator bool
 }
 
 // newSession takes the handshake's cipher states: cs1 encrypts
 // initiator -> responder, cs2 the other way.
 func newSession(cs1, cs2 *noise.CipherState, initiator bool) (*Session, error) {
 	i2r, r2i := cs1.Cipher(), cs2.Cipher()
-	s := &Session{send: i2r, recv: r2i}
+	s := &Session{send: i2r, recv: r2i, initiator: initiator}
 	if !initiator {
 		s.send, s.recv = r2i, i2r
 	}
@@ -89,6 +90,14 @@ func deriveHopKey(i2r noise.Cipher) ([]byte, error) {
 
 // HopKey is the secret both peers derive the hop schedule from.
 func (s *Session) HopKey() []byte { return s.hopKey }
+
+// sides returns our side of the link and the peer's.
+func (s *Session) sides() (local, peer byte) {
+	if s.initiator {
+		return SideInitiator, SideResponder
+	}
+	return SideResponder, SideInitiator
+}
 
 // Seal appends an encrypted packet to dst, which must not overlap payload.
 func (s *Session) Seal(dst []byte, typ byte, payload []byte) ([]byte, error) {

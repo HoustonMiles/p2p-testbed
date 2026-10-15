@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"net"
 	"sync"
 	"testing"
@@ -61,6 +62,30 @@ func TestLoopbackDirect(t *testing.T) {
 		if r.HopsOK < 3 || r.HopsMissed > 0 || r.AuthFailed > 0 || r.Replayed > 0 {
 			t.Errorf("%c: hops ok %d, missed %d, auth failed %d, replayed %d",
 				role, r.HopsOK, r.HopsMissed, r.AuthFailed, r.Replayed)
+		}
+	}
+}
+
+// The peer with the lower key starts the handshake, whichever role it has.
+// Swapping the keys between the roles covers both orders.
+func TestLoopbackDirectInitiatorByKey(t *testing.T) {
+	aLower := bytes.Compare(testKeys['a'].Public, testKeys['b'].Public) < 0
+	swap := func(c *Config) {
+		other := 'a' + 'b' - c.Role
+		c.Direct.Key, c.Direct.PeerKey = testKeys[other], testKeys[c.Role].Public
+	}
+	for _, swapped := range []bool{false, true} {
+		results := runPair(t, directConfig("kk", "file"), withKeys, func(c *Config) {
+			if swapped {
+				swap(c)
+			}
+		})
+		a, b := results['a'], results['b']
+		if a.Error != "" || b.Error != "" || a.Initiator == nil || b.Initiator == nil {
+			t.Fatalf("swapped %v: errors %q / %q, initiator %v / %v", swapped, a.Error, b.Error, a.Initiator, b.Initiator)
+		}
+		if want := aLower != swapped; *a.Initiator != want || *b.Initiator == want {
+			t.Errorf("swapped %v: a initiator %v, b initiator %v; want a %v", swapped, *a.Initiator, *b.Initiator, want)
 		}
 	}
 }

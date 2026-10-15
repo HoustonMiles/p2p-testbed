@@ -10,7 +10,6 @@ import (
 type Config struct {
 	Session  *Session
 	Schedule *Schedule // built from Session.HopKey(); the same on both peers
-	Role     byte      // 'a' or 'b'; the peer is the other
 	PeerIP   netip.Addr
 	LocalIP  netip.Addr // zero binds all interfaces
 
@@ -59,8 +58,6 @@ func (c Config) validate() error {
 	switch {
 	case c.Session == nil || c.Schedule == nil:
 		return errors.New("direct: Session and Schedule are required")
-	case c.Role != 'a' && c.Role != 'b':
-		return errors.New("direct: role must be a or b")
 	case !c.PeerIP.IsValid():
 		return errors.New("direct: PeerIP is required")
 	}
@@ -80,4 +77,3 @@ func (c Config) validateTiming() error {
 	}
 	return nil
 }
-

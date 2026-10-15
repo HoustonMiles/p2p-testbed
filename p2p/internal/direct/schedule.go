@@ -12,7 +12,7 @@ import (
 // Schedule maps time slots to ports. Both peers compute the same table from
 // the hop key and their own clocks, so nothing about it is sent:
 //
-//	port(role, slot) = PortBase + HKDF-Expand(hopKey, "hop port"|role|slot) mod PortCount
+//	port(side, slot) = PortBase + HKDF-Expand(hopKey, "hop port"|side|slot) mod PortCount
 //
 // It gives the LOCAL port, which is also the public port only behind NATs
 // that keep source ports.
@@ -71,12 +71,19 @@ func (s *Schedule) SlotStart(slot uint64) time.Time {
 	return s.epoch().Add(time.Duration(slot) * s.Interval)
 }
 
-// Port returns role's port in slot. The role is part of the input so the
+// The two ends of a link, named by their handshake roles rather than by
+// who the peers are, so every pair in a mesh derives its ports the same way.
+const (
+	SideInitiator byte = 'i'
+	SideResponder byte = 'r'
+)
+
+// Port returns side's port in slot. The side is part of the input so the
 // two peers' port sequences are independent.
-func (s *Schedule) Port(role byte, slot uint64) uint16 {
+func (s *Schedule) Port(side byte, slot uint64) uint16 {
 	info := make([]byte, 0, 18)
 	info = append(info, "hop port"...)
-	info = append(info, role)
+	info = append(info, side)
 	info = binary.BigEndian.AppendUint64(info, slot)
 
 	// Expand alone is enough: the hop key is already a uniform secret.
@@ -100,4 +107,3 @@ func SkewedClock(offset time.Duration, driftPPM float64) func() time.Time {
 		return now.Add(offset + drift)
 	}
 }
-

@@ -1,6 +1,8 @@
 package peer
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -39,17 +41,18 @@ func (r *runner) startDirect() (bool, error) {
 	return true, nil
 }
 
-// handshake runs Noise over the punched socket: a initiates; both sides
-// resend their last message until done, and answer the peer's messages
-// from onHandshake in whatever step they are. The prologue binds the
-// handshake to this trial.
+// handshake runs Noise over the punched socket: the peer with the lower
+// static key initiates; both sides resend their last message until done,
+// and answer the peer's messages from onHandshake in whatever step they
+// are. The prologue binds the handshake to this trial.
 func (r *runner) handshake() error {
 	hs, err := r.newHandshake()
 	if err != nil {
 		return err
 	}
 	r.hs = hs
-	if r.cfg.Role == 'a' {
+	r.res.Initiator = ptr(hs.Initiator())
+	if hs.Initiator() {
 		if _, err := hs.Start(); err != nil {
 			return err
 		}
@@ -76,9 +79,13 @@ func (r *runner) newHandshake() (*direct.Handshake, error) {
 	if err != nil {
 		return nil, err
 	}
+	initiator, err := r.initiates(peerKey)
+	if err != nil {
+		return nil, err
+	}
 	return direct.NewHandshake(direct.HandshakeConfig{
 		Pattern:   r.cfg.Direct.Noise,
-		Initiator: r.cfg.Role == 'a',
+		Initiator: initiator,
 		Static:    r.cfg.Direct.Key,
 		PeerKey:   peerKey,
 		Prologue:  append([]byte("p2ptestbed direct v2"), wire.U64(r.cfg.Session)...),
@@ -101,6 +108,24 @@ func (r *runner) expectedPeerKey() ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unknown peer key source %q", d.PeerKeyFrom)
 	}
+}
+
+// initiates reports whether we start the handshake. Ordering by static key
+// lets any two peers of a mesh agree without being told roles. Under
+// -peer-key none the rendezvous's key only sets the order; the handshake
+// itself is what authenticates the peer.
+func (r *runner) initiates(peerKey []byte) (bool, error) {
+	if peerKey == nil {
+		peerKey = r.rdvKey
+	}
+	order := bytes.Compare(r.cfg.Direct.Key.Public, peerKey)
+	switch {
+	case peerKey == nil:
+		return false, errors.New("cannot tell who starts the handshake: no key for the peer from a file or the rendezvous")
+	case order == 0:
+		return false, errors.New("the peer has our static key (each peer needs its own: punch -genkey)")
+	}
+	return order < 0, nil
 }
 
 func (r *runner) resendHandshake() {
@@ -144,11 +169,11 @@ func (r *runner) startHopper() error {
 	}
 	var err error
 	r.hopper, err = direct.NewHopper(direct.Config{
-		Session: r.hs.Session(), Schedule: sched, Role: r.cfg.Role,
+		Session: r.hs.Session(), Schedule: sched,
 		PeerIP: r.remote.Addr(), LocalIP: r.localIP(),
 		Lead: d.HopLead, MinOverlap: d.HopMinOverlap, MaxOverlap: d.HopMaxOverlap, DrainIdle: d.HopDrainIdle,
 		OnPacket: r.onHop,
-		Logf:     r.cfg.Logf,
+		Logf:     r.logf,
 	})
 	if err != nil {
 		return err

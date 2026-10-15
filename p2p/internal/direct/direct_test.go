@@ -129,22 +129,22 @@ func TestSchedulePorts(t *testing.T) {
 	other := NewSchedule(key(8), time.Second)
 	same, differs := 0, 0
 	for slot := uint64(0); slot < 1000; slot++ {
-		p := s.Port('a', slot)
+		p := s.Port(SideInitiator, slot)
 		if p < 10000 || p > 32767 {
 			t.Fatalf("port %d out of range", p)
 		}
-		if p != s.Port('a', slot) {
+		if p != s.Port(SideInitiator, slot) {
 			t.Fatal("not deterministic")
 		}
-		if p == s.Port('b', slot) {
+		if p == s.Port(SideResponder, slot) {
 			same++
 		}
-		if p != other.Port('a', slot) {
+		if p != other.Port(SideInitiator, slot) {
 			differs++
 		}
 	}
 	if same > 5 || differs < 990 {
-		t.Fatalf("roles collide %d times, other key differs %d times", same, differs)
+		t.Fatalf("sides collide %d times, other key differs %d times", same, differs)
 	}
 	if s.SlotAt(s.SlotStart(42)) != 42 || s.SlotAt(s.SlotStart(43).Add(-1)) != 42 {
 		t.Fatal("slot boundaries")
@@ -255,22 +255,22 @@ func hopperRun(t *testing.T, offset, interval, lead, minOverlap, maxOverlap time
 	lo := netip.MustParseAddr("127.0.0.1")
 	var gotA, gotB atomic.Uint64
 
-	mk := func(sess *Session, role byte, got *atomic.Uint64, clock func() time.Time) *Hopper {
+	mk := func(sess *Session, got *atomic.Uint64, clock func() time.Time) *Hopper {
 		s := NewSchedule(sess.HopKey(), interval)
 		s.Clock = clock
 		h, err := NewHopper(Config{
-			Session: sess, Schedule: s, Role: role, PeerIP: lo, LocalIP: lo,
+			Session: sess, Schedule: s, PeerIP: lo, LocalIP: lo,
 			Lead: lead, MinOverlap: minOverlap, MaxOverlap: maxOverlap,
 			OnPacket: func(Inbound) { got.Add(1) },
-				    Logf:     t.Logf,
+			Logf:     t.Logf,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return h
 	}
-	ha := mk(a, 'a', &gotA, nil)
-	hb := mk(b, 'b', &gotB, SkewedClock(offset, 0))
+	ha := mk(a, &gotA, nil)
+	hb := mk(b, &gotB, SkewedClock(offset, 0))
 	defer ha.Close()
 	defer hb.Close()
 

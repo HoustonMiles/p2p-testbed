@@ -35,6 +35,7 @@ attackers across NAT types?
 | Port-hopping: clock-based HKDF port schedule, early open + probing, drain-based close | done, tests pass | `p2p/internal/direct/schedule.go`, `hopper.go` |
 | `punch -direct`: handshake, port check, hopping, then ping + throughput through the hopper | done, tests pass | `p2p/internal/peer/`, `p2p/cmd/punch` |
 | Clock offset/drift flags | done | `punch -clock-offset`, `-clock-drift-ppm` |
+| Mesh step 1: the lower static key starts the handshake; the direct channel has no a/b roles | done, tests pass | `p2p/internal/peer/direct.go` (`initiates`), `p2p/internal/direct/schedule.go` (sides) |
 | Result reports (standard library only) | done | `p2prunner hops`, `p2prunner compare` (`p2prunner/reports.py`) |
 | Tests: Go unit + fuzz tests beside the code, Python `unittest` in `tests/` | done | see Testing |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
@@ -112,6 +113,7 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 
 | Part | What it is for |
 |---|---|
+| Full mesh, steps 2-5: group rendezvous (rooms instead of a/b sessions); a link manager with one handshake and hopper per neighbor, sharing sockets when two links pick the same port; an N-peer testbed with per-link results; a mesh experiment (time to full mesh, hop success per link as N grows, port clashes) | The paper's system is a mesh of pairwise direct links |
 | Relay baseline: coturn as a TURN relay in the testbed (203.0.113.102), `punch -relay`, `relay_path` experiment | The comparison baseline, and the path for pairings that cannot hop |
 | Handoff Manager | Falls back to the relay when `hop_possible` is false or hopping stops holding |
 | Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |
@@ -121,6 +123,9 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 
 ### Paper updates pending
 
+- Scope: the system is a full mesh of pairwise direct links, each with its
+  own Noise session, hop key and schedule (the proposal still speaks of "the
+  two authenticated peers"). In each pair the lower static key initiates.
 - Procedures: the rendezvous is UDP, not WebSocket (it must see each peer's
   public UDP mapping for the punch); it carries the static public keys. The
   handshake is Noise KK, IK or XX (`-noise`), matching the "peers already
@@ -400,8 +405,9 @@ channel in `p2p/internal/direct/`:
 - `noise.go`: the UDP transport, with explicit nonces and a 2048-packet
   replay window. The hop key is derived from the session keys.
 - `schedule.go`: time is cut into slots of `-hop-interval`; each side's port
-  for each slot is HKDF(hop key, role, slot), from the range 10000-32767
-  (below Linux's ephemeral ports). Nothing about the schedule is sent.
+  for each slot is HKDF(hop key, side, slot), from the range 10000-32767
+  (below Linux's ephemeral ports), where side is initiator or responder.
+  Nothing about the schedule is sent.
 - `hopper.go`: opens the next slot's port `-hop-lead` early and probes the
   peer's next port until both directions work (the hole punch, repeated on
   every hop), sends on the current slot, and closes the old port once it has
@@ -412,7 +418,10 @@ channel in `p2p/internal/direct/`:
 **Handshake patterns and keys.** Each peer has a static keypair in `./keys`
 (mounted at `/keys`; make them with `punch -genkey /keys/a` and `/keys/b`).
 The rendezvous passes each peer's public key to the other with the
-addresses, for the setups that take keys from it.
+addresses, for the setups that take keys from it. The peer with the lower
+public key initiates, so no peer needs to be told a role; with `-peer-key
+none` the key the rendezvous announced sets the order, and the handshake
+still authenticates whoever answers.
 
 | `-noise` | Peers know beforehand | Fits | `-peer-key` |
 |---|---|---|---|
@@ -454,7 +463,7 @@ docker compose exec peer-b punch -role b -session 42 -direct -hop-interval 1s
 | `-hop-force` | off | hop even when a NAT changes ports, to measure the failure |
 | `-clock-offset`, `-clock-drift-ppm` | 0 | skew this peer's hop clock |
 
-Extra result columns: `direct`, `noise`, `peer_key_from`, `handshake_ms`, `keeps_port`,
+Extra result columns: `direct`, `noise`, `peer_key_from`, `initiator`, `handshake_ms`, `keeps_port`,
 `peer_keeps_port`, `hop_possible`, `hopping`, `hop_connected`,
 `hop_interval_ms`, `clock_offset_ms`, `clock_drift_ppm`, and the hopper's
 counters, all prefixed `hop_`:
