@@ -6,6 +6,9 @@ __pycache__/
 # or remove this line if you want results in git.
 results/
 
+# Static Noise keys (punch -genkey); private, and specific to this machine
+keys/
+
 # Output of runs started with nohup
 *.log
 

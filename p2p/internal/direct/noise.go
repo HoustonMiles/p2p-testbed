@@ -2,14 +2,14 @@
 // the punched socket, then an encrypted UDP transport whose ports follow a
 // schedule derived from the session keys.
 //
-//   - noise.go     handshake and transport
-//   - schedule.go  which port each peer uses in each time slot
-//   - hopper.go    the sockets that follow the schedule
+//   - keys.go       long-lived static keypairs and key files
+//   - handshake.go  the Noise handshake (kk, ik or xx)
+//   - noise.go      the transport: sealing, opening, replay window, hop key
+//   - schedule.go   which port each peer uses in each time slot
+//   - hopper.go     the sockets that follow the schedule
 package direct
 
 import (
-	"bytes"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -21,125 +21,6 @@ import (
 	"github.com/flynn/noise"
 	"golang.org/x/crypto/hkdf"
 )
-
-// NNpsk0: ephemeral keys on both sides give forward secrecy; the PSK keeps
-// the rendezvous server (which hands out the addresses) from sitting in the
-// middle.
-//
-// TODO(paper §5 Procedures, "Noise static public keys"): the paper uses
-// static keys exchanged at the rendezvous. Add KK (peers already know each
-// other), IK (initiator knows the responder) and XX (first contact) as a
-// selectable pattern, and drop the PSK.
-var suite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.HashBLAKE2s)
-
-const PSKSize = 32
-
-// Handshake builds and checks handshake messages; the caller carries them
-// over the punched socket and retransmits Last() until Done. It is not safe
-// for concurrent use.
-type Handshake struct {
-	hs        *noise.HandshakeState
-	initiator bool
-	first     []byte // responder: the initiator's message, to recognise retransmits
-	last      []byte
-	session   *Session
-}
-
-// NewHandshake starts one side. Both sides must pass the same prologue; use
-// one that names the trial so a handshake cannot be replayed into another.
-func NewHandshake(initiator bool, psk, prologue []byte) (*Handshake, error) {
-	if len(psk) != PSKSize {
-		return nil, errors.New("direct: psk must be 32 bytes")
-	}
-	hs, err := noise.NewHandshakeState(noise.Config{
-		CipherSuite:           suite,
-		Random:                rand.Reader,
-		Pattern:               noise.HandshakeNN,
-		Initiator:             initiator,
-		Prologue:              prologue,
-		PresharedKey:          psk,
-		PresharedKeyPlacement: 0,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &Handshake{hs: hs, initiator: initiator}, nil
-}
-
-// Start returns the initiator's first message.
-func (h *Handshake) Start() ([]byte, error) {
-	if !h.initiator {
-		return nil, errors.New("direct: only the initiator starts the handshake")
-	}
-	if h.last != nil {
-		return h.last, nil
-	}
-	msg, _, _, err := h.hs.WriteMessage(nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	h.last = msg
-	return msg, nil
-}
-
-// Handle processes one message from the peer and returns the reply to send,
-// if any. An error means the message was invalid; drop it and keep waiting
-// (flynn/noise rolls its state back on a failed read).
-func (h *Handshake) Handle(msg []byte) (reply []byte, err error) {
-	switch {
-	case h.session != nil:
-		return h.handleDuplicate(msg), nil
-	case h.initiator:
-		return nil, h.finishInitiator(msg)
-	default:
-		return h.respond(msg)
-	}
-}
-
-// handleDuplicate answers a retransmitted first message: our reply was
-// probably lost. Duplicate replies to the initiator need no answer.
-func (h *Handshake) handleDuplicate(msg []byte) []byte {
-	if !h.initiator && bytes.Equal(msg, h.first) {
-		return h.last
-	}
-	return nil
-}
-
-func (h *Handshake) finishInitiator(msg []byte) error {
-	if h.last == nil {
-		return errors.New("direct: Start must be called first")
-	}
-	_, cs1, cs2, err := h.hs.ReadMessage(nil, msg)
-	if err != nil {
-		return err
-	}
-	h.session, err = newSession(cs1, cs2, true)
-	return err
-}
-
-func (h *Handshake) respond(msg []byte) ([]byte, error) {
-	if _, _, _, err := h.hs.ReadMessage(nil, msg); err != nil {
-		return nil, err
-	}
-	out, cs1, cs2, err := h.hs.WriteMessage(nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	h.first = append([]byte(nil), msg...)
-	h.last = out
-	h.session, err = newSession(cs1, cs2, false)
-	return out, err
-}
-
-// Last is the message to retransmit while waiting.
-func (h *Handshake) Last() []byte { return h.last }
-
-// Done reports whether this side has finished. The responder finishes when
-// it sends its reply, before knowing it arrived, so it must keep answering
-// retransmits through Handle.
-func (h *Handshake) Done() bool { return h.session != nil }
-
-func (h *Handshake) Session() *Session { return h.session }
 
 // Packet types. The type travels in the clear but is authenticated as part
 // of the associated data.
@@ -196,9 +77,9 @@ func newSession(cs1, cs2 *noise.CipherState, initiator bool) (*Session, error) {
 
 // deriveHopKey encrypts zeros under the reserved nonce (as Noise's REKEY
 // does) and runs the result through HKDF. Only the two peers hold the
-// cipher key, the result is fresh per handshake, and the hop schedule stays
-// independent of the packet keys. The handshake hash would not do: with
-// NNpsk0 it depends on the PSK and public values only, not the DH secret.
+// cipher key, the result is fresh per handshake (ephemeral keys), and the
+// hop schedule stays independent of the packet keys. The handshake hash
+// would not do: it is computed from the public transcript.
 func deriveHopKey(i2r noise.Cipher) ([]byte, error) {
 	block := i2r.Encrypt(nil, math.MaxUint64, []byte("p2ptestbed hop key"), make([]byte, 32))
 	key := make([]byte, 32)
@@ -301,4 +182,3 @@ func (w *replayWindow) advance(n uint64) {
 	}
 	w.next = n + 1
 }
-

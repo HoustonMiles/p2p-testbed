@@ -2,44 +2,67 @@ package direct
 
 import (
 	"bytes"
+	"errors"
 	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// handshake runs both sides in memory and returns the two sessions.
-func handshake(t testing.TB, pskA, pskB []byte) (a, b *Session, err error) {
-	t.Helper()
-	ha, err := NewHandshake(true, pskA, []byte("trial 1"))
+// testKey is a fixed keypair, so tests are repeatable.
+func testKey(b byte) Keypair {
+	kp, err := keypairFrom(bytes.Repeat([]byte{b}, KeySize))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
-	hb, err := NewHandshake(false, pskB, []byte("trial 1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m1, err := ha.Start()
-	if err != nil {
-		t.Fatal(err)
-	}
-	m2, err := hb.Handle(m1)
-	if err != nil {
-		return nil, nil, err
-	}
-	if _, err := ha.Handle(m2); err != nil {
-		return nil, nil, err
-	}
-	return ha.Session(), hb.Session(), nil
+	return kp
 }
 
-func psk(b byte) []byte { return bytes.Repeat([]byte{b}, PSKSize) }
+func key(b byte) []byte { return bytes.Repeat([]byte{b}, KeySize) }
 
-func TestHandshakeAndTransport(t *testing.T) {
-	a, b, err := handshake(t, psk(1), psk(1))
+// sides builds both sides of a handshake. initiatorExpects and
+// responderExpects are the peer keys each side is given (nil: none).
+func sides(t testing.TB, pattern string, initiatorExpects, responderExpects []byte) (*Handshake, *Handshake) {
+	t.Helper()
+	a, err := NewHandshake(HandshakeConfig{Pattern: pattern, Initiator: true, Static: testKey(1),
+		PeerKey: initiatorExpects, Prologue: []byte("trial 1")})
 	if err != nil {
 		t.Fatal(err)
 	}
+	b, err := NewHandshake(HandshakeConfig{Pattern: pattern, Static: testKey(2),
+		PeerKey: responderExpects, Prologue: []byte("trial 1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, b
+}
+
+// exchange delivers each message to the other side until no reply comes.
+func exchange(a, b *Handshake) error {
+	msg, err := a.Start()
+	to, from := b, a
+	for i := 0; i < 4 && msg != nil && err == nil; i++ {
+		msg, err = to.Handle(msg)
+		to, from = from, to
+	}
+	if err == nil && !(a.Done() && b.Done()) {
+		err = errors.New("handshake did not finish")
+	}
+	return err
+}
+
+// handshake returns the two sessions of a KK handshake between keys 1 and 2.
+func handshake(t testing.TB) (a, b *Session) {
+	t.Helper()
+	ha, hb := sides(t, "kk", testKey(2).Public, testKey(1).Public)
+	if err := exchange(ha, hb); err != nil {
+		t.Fatal(err)
+	}
+	return ha.Session(), hb.Session()
+}
+
+func TestTransport(t *testing.T) {
+	a, b := handshake(t)
 	if !bytes.Equal(a.HopKey(), b.HopKey()) {
 		t.Fatal("hop keys differ")
 	}
@@ -55,33 +78,8 @@ func TestHandshakeAndTransport(t *testing.T) {
 	}
 }
 
-func TestWrongPSKFails(t *testing.T) {
-	if _, _, err := handshake(t, psk(1), psk(2)); err == nil {
-		t.Fatal("handshake with different PSKs succeeded")
-	}
-}
-
-func TestHandshakeRetransmits(t *testing.T) {
-	ha, _ := NewHandshake(true, psk(1), nil)
-	hb, _ := NewHandshake(false, psk(1), nil)
-	m1, _ := ha.Start()
-	m2, _ := hb.Handle(m1)
-	// Reply lost: the initiator resends m1 and must get the same reply.
-	again, err := hb.Handle(ha.Last())
-	if err != nil || !bytes.Equal(again, m2) {
-		t.Fatalf("responder did not resend its reply: %v", err)
-	}
-	// A forged message does not break the waiting initiator.
-	if _, err := ha.Handle([]byte("garbage garbage garbage garbage garbage garbage")); err == nil {
-		t.Fatal("garbage accepted")
-	}
-	if _, err := ha.Handle(m2); err != nil || !ha.Done() {
-		t.Fatalf("initiator: %v", err)
-	}
-}
-
 func TestTamperAndReorder(t *testing.T) {
-	a, b, _ := handshake(t, psk(1), psk(1))
+	a, b := handshake(t)
 	var pkts [][]byte
 	for i := 0; i < 100; i++ {
 		p, _ := a.Seal(nil, TypeData, []byte{byte(i)})
@@ -127,8 +125,8 @@ func TestReplayWindow(t *testing.T) {
 }
 
 func TestSchedulePorts(t *testing.T) {
-	s := NewSchedule(psk(7), time.Second)
-	other := NewSchedule(psk(8), time.Second)
+	s := NewSchedule(key(7), time.Second)
+	other := NewSchedule(key(8), time.Second)
 	same, differs := 0, 0
 	for slot := uint64(0); slot < 1000; slot++ {
 		p := s.Port('a', slot)
@@ -253,10 +251,7 @@ func TestHopperLoopback(t *testing.T) {
 
 // hopperRun runs both hoppers and checks every packet arrived, unless lossy.
 func hopperRun(t *testing.T, offset, interval, lead, minOverlap, maxOverlap time.Duration, lossy bool) (Stats, Stats) {
-	a, b, err := handshake(t, psk(1), psk(1))
-	if err != nil {
-		t.Fatal(err)
-	}
+	a, b := handshake(t)
 	lo := netip.MustParseAddr("127.0.0.1")
 	var gotA, gotB atomic.Uint64
 

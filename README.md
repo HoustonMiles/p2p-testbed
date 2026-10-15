@@ -31,7 +31,7 @@ attackers across NAT types?
 | Analysis notebook | done | `analysis/results.ipynb` |
 | Raw UDP hole-punching baseline (STUN, rendezvous, punch, peer-to-peer RTT, throughput) | done, tests pass | `p2p/` (`punch`, `rendezvous`) |
 | Rendezvous server in the testbed | done | `rendezvous` service, 203.0.113.101:7000 |
-| Direct channel: Noise handshake (NNpsk0), encrypted UDP transport with replay window | done, tests pass | `p2p/internal/direct/noise.go` |
+| Direct channel: Noise handshake (KK, IK or XX with static keys; `punch -genkey`), encrypted UDP transport with replay window | done, tests pass | `p2p/internal/direct/handshake.go`, `noise.go` |
 | Port-hopping: clock-based HKDF port schedule, early open + probing, drain-based close | done, tests pass | `p2p/internal/direct/schedule.go`, `hopper.go` |
 | `punch -direct`: handshake, port check, hopping, then ping + throughput through the hopper | done, tests pass | `p2p/internal/peer/`, `p2p/cmd/punch` |
 | Clock offset/drift flags | done | `punch -clock-offset`, `-clock-drift-ppm` |
@@ -121,6 +121,10 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 
 ### Paper updates pending
 
+- Procedures: the rendezvous is UDP, not WebSocket (it must see each peer's
+  public UDP mapping for the punch); it carries the static public keys. The
+  handshake is Noise KK, IK or XX (`-noise`), matching the "peers already
+  in a network" or "first contact" assumption.
 - Methodology: describe the testbed as built (CGNAT, RFC 4787 names for the
   NAT types, half the RTT per direction, downlink cap before the NAT, RFC 5780
   verification run without packet loss).
@@ -171,6 +175,8 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 ```bash
 ./scripts/host_setup.sh                 # once per boot (uses sudo)
 docker compose up -d --build --wait     # build (incl. the Go tools) and start
+docker compose exec peer-a punch -genkey /keys/a   # once: static Noise keys for -direct,
+docker compose exec peer-b punch -genkey /keys/b   #   kept in ./keys (not in git)
 uv run python -m p2prunner smoke        # sanity check (seconds)
 uv run python -m p2prunner verify       # RFC 5780 check of the running NAT types (~10 s)
 uv run python -m p2prunner verify --all # check every NAT type and CGNAT (~1 min)
@@ -387,9 +393,11 @@ and those pairings need the relay.
 baseline, but after the punch it moves to the encrypted, port-hopping
 channel in `p2p/internal/direct/`:
 
-- `noise.go`: Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s handshake over the
-  punched socket (the pre-shared key stops a man in the middle at the
-  rendezvous), then a UDP transport with explicit nonces and a 2048-packet
+- `handshake.go`, `keys.go`: Noise handshake over the punched socket
+  (X25519, ChaChaPoly, BLAKE2s) with each peer's static key; the pattern is
+  chosen with `-noise` (below). Both sides resend until done, so lost or
+  repeated handshake packets are harmless.
+- `noise.go`: the UDP transport, with explicit nonces and a 2048-packet
   replay window. The hop key is derived from the session keys.
 - `schedule.go`: time is cut into slots of `-hop-interval`; each side's port
   for each slot is HKDF(hop key, role, slot), from the range 10000-32767
@@ -400,6 +408,24 @@ channel in `p2p/internal/direct/`:
   drained: after `-hop-min-overlap`, as soon as traffic has moved to the new
   port and the old one has been quiet for `-hop-drain-idle`, and at the
   latest after `-hop-overlap`.
+
+**Handshake patterns and keys.** Each peer has a static keypair in `./keys`
+(mounted at `/keys`; make them with `punch -genkey /keys/a` and `/keys/b`).
+The rendezvous passes each peer's public key to the other with the
+addresses, for the setups that take keys from it.
+
+| `-noise` | Peers know beforehand | Fits | `-peer-key` |
+|---|---|---|---|
+| `kk` (default) | each other's key | peers already in a network | a file (default `/keys/<other>.pub`) |
+| `ik` | the initiator knows the responder's key | known network, WireGuard-style; 1 round trip | a file, or `rendezvous` |
+| `xx` | nothing; keys travel in the handshake | first contact; 1.5 round trips | `rendezvous` (checked against it) or `none` (trust on first use) |
+
+All three authenticate both peers and give forward secrecy. `-peer-key
+rendezvous` trusts the rendezvous not to swap keys; a key file does not.
+A peer that presents an unexpected key is rejected, and an impostor cannot
+block the real initiator (the responder starts over). In the testbed both
+peers can read both private keys in `./keys`; attacker containers must not
+mount it.
 
 Steps added after the punch: Noise handshake; a barrier carrying each side's
 port check (does its NAT keep the local port); if both do (or `-hop-force`),
@@ -416,7 +442,10 @@ docker compose exec peer-b punch -role b -session 42 -direct -hop-interval 1s
 | Flag | Default | Meaning |
 |---|---|---|
 | `-direct` | off | use the direct channel |
-| `-psk` | derived from `-session` | 64 hex digits, the same on both peers. The default is a testbed convenience only: anyone who knows the session ID knows the key. Pass a random one for attack experiments. |
+| `-noise` | `kk` | handshake pattern: `kk`, `ik` or `xx` (see above) |
+| `-key` | `/keys/<role>.key` | this peer's static key |
+| `-peer-key` | `/keys/<other role>.pub` | the peer's public key file, `rendezvous` or `none` |
+| `-genkey BASE` | | write `BASE.key` and `BASE.pub`, then exit |
 | `-hop-interval` | 1s | slot length |
 | `-hop-lead` | interval/10 | open the next port this early |
 | `-hop-min-overlap` | interval/10 | keep the old port at least this long (with `-hop-lead`, the clock tolerance) |
@@ -425,7 +454,7 @@ docker compose exec peer-b punch -role b -session 42 -direct -hop-interval 1s
 | `-hop-force` | off | hop even when a NAT changes ports, to measure the failure |
 | `-clock-offset`, `-clock-drift-ppm` | 0 | skew this peer's hop clock |
 
-Extra result columns: `direct`, `handshake_ms`, `keeps_port`,
+Extra result columns: `direct`, `noise`, `peer_key_from`, `handshake_ms`, `keeps_port`,
 `peer_keeps_port`, `hop_possible`, `hopping`, `hop_connected`,
 `hop_interval_ms`, `clock_offset_ms`, `clock_drift_ppm`, and the hopper's
 counters, all prefixed `hop_`:

@@ -50,9 +50,15 @@ func (r *runner) doSTUN() error {
 	return nil
 }
 
+// meetAtRendezvous registers (with our static key in direct mode, so the
+// rendezvous can pass it to the peer) until the peer is introduced.
 func (r *runner) meetAtRendezvous() error {
+	var key []byte
+	if r.cfg.Direct != nil {
+		key = r.cfg.Direct.Key.Public
+	}
 	ok := r.pump(r.cfg.RendezvousTimeout, 100*time.Millisecond,
-		func() { r.sendTo(r.rdv, wire.Register, 0, nil) },
+		func() { r.sendTo(r.rdv, wire.Register, 0, key) },
 		func() bool { return r.peerInfo })
 	if !ok {
 		return errors.New("no introduction from the rendezvous server (is the other peer running?)")
@@ -98,4 +104,3 @@ func resolve(hostport string) (netip.AddrPort, error) {
 	ap := a.AddrPort()
 	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()), nil
 }
-

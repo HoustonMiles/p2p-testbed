@@ -26,16 +26,16 @@ const (
 type Type uint8
 
 const (
-	Register   Type = iota + 1 // peer -> rendezvous: "I am <role> of <session>"
-	PeerInfo                   // rendezvous -> peer: your public address and the other peer's
+	Register   Type = iota + 1 // peer -> rendezvous: "I am <role> of <session>"; body: our static public key, if any
+	PeerInfo                   // rendezvous -> peer: your public address and the other peer's, then its key
 	Punch                      // peer -> peer: hole-punching probe
 	PunchAck                   // reply to a Punch: proves the path works both ways
 	Ping                       // body: sender's timestamp (ns), echoed back in the Pong
 	Pong                       // reply to a Ping
 	Barrier                    // "I have reached step <seq>"; body: a value (e.g. packets sent)
-BarrierAck                 // reply to a Barrier from a peer that has reached that step too
-Data                       // throughput test payload (padding)
-Handshake                  // peer -> peer: a Noise handshake message (direct channel only)
+	BarrierAck                 // reply to a Barrier from a peer that has reached that step too
+	Data                       // throughput test payload (padding)
+	Handshake                  // peer -> peer: a Noise handshake message (direct channel only)
 )
 
 type Packet struct {
@@ -91,6 +91,19 @@ func Addrs(self, peer netip.AddrPort) []byte {
 		b = binary.BigEndian.AppendUint16(b, a.Port())
 	}
 	return b
+}
+
+// KeySize is the length of a static public key carried by Register and
+// PeerInfo.
+const KeySize = 32
+
+// PeerKey is the other peer's static public key, carried after the
+// addresses in a PeerInfo body; nil when that peer registered without one.
+func PeerKey(peerInfoBody []byte) []byte {
+	if len(peerInfoBody) < 12+KeySize {
+		return nil
+	}
+	return peerInfoBody[12 : 12+KeySize]
 }
 
 func ParseAddrs(b []byte) (self, peer netip.AddrPort, ok bool) {

@@ -56,6 +56,8 @@ services:
     <<: *host
     environment:
       GATEWAY: 192.168.10.2                   # nat-a's LAN address
+    # Static Noise keys, made with: docker compose exec peer-a punch -genkey /keys/a
+    volumes: ["./keys:/keys"]
     networks:
       lan_a: { ipv4_address: 192.168.10.10 }
     depends_on:
@@ -105,6 +107,7 @@ services:
     <<: *host
     environment:
       GATEWAY: 192.168.20.2
+    volumes: ["./keys:/keys"]
     networks:
       lan_b: { ipv4_address: 192.168.20.10 }
     depends_on:

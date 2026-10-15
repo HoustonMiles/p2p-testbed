@@ -11,10 +11,7 @@ import (
 
 // FuzzOpen: a datagram that was not sealed by the peer never authenticates.
 func FuzzOpen(f *testing.F) {
-	a, b, err := handshake(f, psk(1), psk(1))
-	if err != nil {
-		f.Fatal(err)
-	}
+	a, b := handshake(f)
 	real, _ := a.Seal(nil, TypeData, []byte("hello"))
 	f.Add(real)
 	f.Add([]byte{TypeData})
@@ -29,14 +26,19 @@ func FuzzOpen(f *testing.F) {
 // FuzzHandshake: garbage handshake messages are rejected without panicking
 // or completing the handshake.
 func FuzzHandshake(f *testing.F) {
-	ha, _ := NewHandshake(true, psk(1), nil)
-	first, _ := ha.Start()
-	f.Add(first)
-	f.Add([]byte{})
-	f.Fuzz(func(t *testing.T, msg []byte) {
-		hb, _ := NewHandshake(false, psk(2), nil) // a different PSK: nothing may pass
-		if _, err := hb.Handle(msg); err == nil || hb.Done() {
-			t.Fatalf("handshake accepted %x", msg)
+	for _, pattern := range []string{"kk", "ik", "xx"} {
+		a, _ := sides(f, pattern, testKey(2).Public, testKey(1).Public)
+		first, _ := a.Start()
+		f.Add(pattern == "xx", first)
+	}
+	f.Add(false, []byte{})
+	f.Fuzz(func(t *testing.T, xx bool, msg []byte) {
+		// The responder expects key 3, which nobody here holds, so no
+		// message may complete the handshake.
+		pattern := map[bool]string{false: "kk", true: "xx"}[xx]
+		_, b := sides(t, pattern, testKey(2).Public, testKey(3).Public)
+		if _, err := b.Handle(msg); b.Done() || (pattern == "kk" && err == nil) {
+			t.Fatalf("%s handshake accepted %x", pattern, msg)
 		}
 	})
 }
@@ -68,11 +70,11 @@ func FuzzReplayWindow(f *testing.F) {
 // sometimes far ahead, sometimes back past the window.
 func jump(n uint64, s byte) uint64 {
 	switch {
-	case s < 200:
-		return n + uint64(s) - min(n, 100)
-	case s < 240:
-		return n + uint64(s)*50
-	default:
-		return n - min(n, windowBits+uint64(s))
+		case s < 200:
+			return n + uint64(s) - min(n, 100)
+		case s < 240:
+			return n + uint64(s)*50
+		default:
+			return n - min(n, windowBits+uint64(s))
 	}
 }

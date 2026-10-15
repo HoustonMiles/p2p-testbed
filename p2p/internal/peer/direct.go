@@ -39,12 +39,12 @@ func (r *runner) startDirect() (bool, error) {
 	return true, nil
 }
 
-// handshake runs Noise over the punched socket: a initiates and retransmits;
-// b answers from onHandshake in whatever step it is. The prologue binds the
+// handshake runs Noise over the punched socket: a initiates; both sides
+// resend their last message until done, and answer the peer's messages
+// from onHandshake in whatever step they are. The prologue binds the
 // handshake to this trial.
 func (r *runner) handshake() error {
-	prologue := append([]byte("p2ptestbed direct v1"), wire.U64(r.cfg.Session)...)
-	hs, err := direct.NewHandshake(r.cfg.Role == 'a', r.cfg.Direct.PSK, prologue)
+	hs, err := r.newHandshake()
 	if err != nil {
 		return err
 	}
@@ -59,17 +59,54 @@ func (r *runner) handshake() error {
 		timeout = r.cfg.PunchTimeout
 	}
 	began := time.Since(r.t0)
-	resend := func() {
-		if r.cfg.Role == 'a' {
-			r.sendTo(r.remote, wire.Handshake, 0, hs.Last())
-		}
+	r.pump(timeout, r.cfg.PunchInterval, r.resendHandshake, func() bool { return hs.Done() || hs.Failed() != nil })
+	if err := hs.Failed(); err != nil {
+		return fmt.Errorf("noise handshake: %w", err)
 	}
-	if !r.pump(timeout, r.cfg.PunchInterval, resend, hs.Done) {
-		return fmt.Errorf("noise handshake: not done after %v (same -psk on both peers?)", timeout)
+	if !hs.Done() {
+		return fmt.Errorf("noise handshake (%s): not done after %v (right keys and -noise on both peers?)", r.cfg.Direct.Noise, timeout)
 	}
 	r.res.HandshakeMs = ptr(ms(time.Since(r.t0) - began))
-	r.logf("handshake: done in %.1f ms", *r.res.HandshakeMs)
+	r.logf("handshake: %s done in %.1f ms", r.cfg.Direct.Noise, *r.res.HandshakeMs)
 	return nil
+}
+
+func (r *runner) newHandshake() (*direct.Handshake, error) {
+	peerKey, err := r.expectedPeerKey()
+	if err != nil {
+		return nil, err
+	}
+	return direct.NewHandshake(direct.HandshakeConfig{
+		Pattern:   r.cfg.Direct.Noise,
+		Initiator: r.cfg.Role == 'a',
+		Static:    r.cfg.Direct.Key,
+		PeerKey:   peerKey,
+		Prologue:  append([]byte("p2ptestbed direct v2"), wire.U64(r.cfg.Session)...),
+	})
+}
+
+// expectedPeerKey is the key the peer must prove it holds: provisioned in
+// a file, as the rendezvous announced it, or none (trust on first use).
+func (r *runner) expectedPeerKey() ([]byte, error) {
+	switch d := r.cfg.Direct; d.PeerKeyFrom {
+	case "file":
+		return d.PeerKey, nil
+	case "rendezvous":
+		if r.rdvKey == nil {
+			return nil, fmt.Errorf("the rendezvous announced no key for the peer")
+		}
+		return r.rdvKey, nil
+	case "none":
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unknown peer key source %q", d.PeerKeyFrom)
+	}
+}
+
+func (r *runner) resendHandshake() {
+	if last := r.hs.Last(); last != nil && !r.hs.Done() {
+		r.sendTo(r.remote, wire.Handshake, 0, last)
+	}
 }
 
 // checkPorts exchanges, at a barrier, whether each side's NAT keeps the
@@ -135,4 +172,3 @@ func (r *runner) closeHopper() {
 		r.hopper.Close()
 	}
 }
-

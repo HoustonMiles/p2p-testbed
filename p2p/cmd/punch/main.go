@@ -4,6 +4,7 @@
 //	punch -role a -session 42      # on peer-a
 //	punch -role b -session 42      # on peer-b, at the same time
 //	punch -role a -session 42 -direct -hop-interval 1s
+//	punch -genkey /keys/a          # write /keys/a.key and /keys/a.pub, then exit
 //
 // Progress goes to stderr; the last line of stdout is one JSON object with
 // every measurement, as the runner's "command" trial type expects. Exit
@@ -12,14 +13,13 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"time"
 
+	"p2ptestbed/p2p/internal/direct"
 	"p2ptestbed/p2p/internal/peer"
 )
 
@@ -30,21 +30,23 @@ func main() {
 	connectFlags(&c)
 	measureFlags(&c)
 	useDirect := flag.Bool("direct", false, "run the Port-Hopping Direct Channel instead of raw UDP")
-	pskHex := flag.String("psk", "", "direct: Noise pre-shared key, 64 hex digits, the same on both peers (default: derived from -session)")
 	directFlags(&d)
+	keys := keyFlags()
+	genkey := flag.String("genkey", "", "write a new static keypair to `BASE`.key and BASE.pub, then exit")
 	quiet := flag.Bool("quiet", false, "no progress output on stderr")
 	flag.Parse()
 
+	if *genkey != "" {
+		os.Exit(writeKeypair(*genkey))
+	}
 	if len(*role) != 1 || !flagSet("session") {
 		usage("usage: punch -role a|b -session N [flags]")
 	}
 	c.Role = (*role)[0]
 	if *useDirect {
-		psk, err := makePSK(*pskHex, c.Session)
-		if err != nil {
-			usage("-psk: " + err.Error())
+		if err := keys.load(&d, c.Role); err != nil {
+			usage(err.Error())
 		}
-		d.PSK = psk
 		c.Direct = &d
 	}
 	if !*quiet {
@@ -90,6 +92,7 @@ func measureFlags(c *peer.Config) {
 }
 
 func directFlags(d *peer.DirectConfig) {
+	flag.StringVar(&d.Noise, "noise", "kk", "direct: handshake pattern: kk (peers know each other's keys), ik (initiator knows the responder's), xx (first contact)")
 	flag.DurationVar(&d.HandshakeTimeout, "handshake-timeout", 5*time.Second, "direct: give up on the Noise handshake after this long")
 	flag.DurationVar(&d.HopInterval, "hop-interval", time.Second, "direct: how long each port is used")
 	flag.DurationVar(&d.HopLead, "hop-lead", 0, "direct: open the next port this long before its slot (0: a tenth of -hop-interval)")
@@ -113,21 +116,52 @@ func usage(msg string) {
 	os.Exit(2)
 }
 
-// makePSK decodes -psk, or derives one from the session ID. The derived key
-// is a testbed convenience: anyone who guesses the session ID (the trial
-// seed) knows it.
-//
-// TODO(paper §5 Threat Model): attack experiments must pass a random -psk,
-// or switch to static keys (see the handshake TODO in package direct).
-func makePSK(hexKey string, session uint64) ([]byte, error) {
-	if hexKey == "" {
-		sum := sha256.Sum256(fmt.Appendf(nil, "p2ptestbed psk %d", session))
-		return sum[:], nil
+type keySettings struct{ key, peerKey *string }
+
+func keyFlags() keySettings {
+	return keySettings{
+		key:     flag.String("key", "", "direct: this peer's static key file (default /keys/<role>.key)"),
+		peerKey: flag.String("peer-key", "", `direct: the peer's public key file (default /keys/<other role>.pub), or "rendezvous" to take the key the rendezvous announces, or "none" to trust it on first use (xx, ik responder)`),
 	}
-	psk, err := hex.DecodeString(hexKey)
-	if err != nil || len(psk) != 32 {
-		return nil, fmt.Errorf("want 64 hex digits (32 bytes)")
-	}
-	return psk, nil
 }
 
+// load reads the key files into d. Make them with -genkey.
+func (k keySettings) load(d *peer.DirectConfig, role byte) error {
+	other := 'a' + 'b' - role
+	keyPath := orDefault(*k.key, fmt.Sprintf("/keys/%c.key", role))
+	kp, err := direct.ReadKeypair(keyPath)
+	if err != nil {
+		return fmt.Errorf("-key: %v (make one with: punch -genkey /keys/%c)", err, role)
+	}
+	d.Key = kp
+	switch from := orDefault(*k.peerKey, fmt.Sprintf("/keys/%c.pub", other)); from {
+	case "rendezvous", "none":
+		d.PeerKeyFrom = from
+	default:
+		d.PeerKeyFrom = "file"
+		if d.PeerKey, err = direct.ReadPublicKey(from); err != nil {
+			return fmt.Errorf("-peer-key: %v", err)
+		}
+	}
+	return nil
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func writeKeypair(base string) int {
+	kp, err := direct.NewKeypair()
+	if err == nil {
+		err = direct.WriteKeypair(base, kp)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "genkey:", err)
+		return 1
+	}
+	fmt.Printf("wrote %s.key and %s.pub\n", base, base)
+	return 0
+}

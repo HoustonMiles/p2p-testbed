@@ -63,9 +63,12 @@ type Config struct {
 // DirectConfig sets up the Port-Hopping Direct Channel. Zero durations take
 // package direct's defaults.
 type DirectConfig struct {
-	PSK              []byte        // 32 bytes, the same on both peers
-	HandshakeTimeout time.Duration // 0: PunchTimeout
-	HopInterval      time.Duration // required
+	Noise            string         // handshake pattern: kk, ik or xx
+	Key              direct.Keypair // this peer's static key
+	PeerKey          []byte         // the peer's expected static key, with PeerKeyFrom "file"
+	PeerKeyFrom      string         // "file", "rendezvous" (take the key it announces) or "none" (trust on first use)
+	HandshakeTimeout time.Duration  // 0: PunchTimeout
+	HopInterval      time.Duration  // required
 	HopLead          time.Duration
 	HopMinOverlap    time.Duration
 	HopMaxOverlap    time.Duration
@@ -125,6 +128,8 @@ type Result struct {
 	RxIPMbit    *float64 `json:"rx_ip_mbit"` // the same, counting IP, UDP and Noise headers
 
 	Direct        bool     `json:"direct"`
+	Noise         string   `json:"noise"`
+	PeerKeyFrom   string   `json:"peer_key_from"`
 	HandshakeMs   *float64 `json:"handshake_ms"`
 	KeepsPort     *bool    `json:"keeps_port"` // STUN-mapped port == local port
 	PeerKeepsPort *bool    `json:"peer_keeps_port"`
@@ -169,6 +174,7 @@ type runner struct {
 	stunGot netip.AddrPort
 
 	rdv       netip.AddrPort
+	rdvKey    []byte // the peer's static key, as the rendezvous announced it
 	peerInfo  bool
 	peerRdv   netip.AddrPort
 	remote    netip.AddrPort // where peer traffic goes; updated by learn
@@ -215,7 +221,7 @@ func newRunner(cfg Config) *runner {
 			RateMbit: cfg.RateMbit, PacketBytes: cfg.Size},
 	}
 	if d := cfg.Direct; d != nil {
-		r.res.Direct = true
+		r.res.Direct, r.res.Noise, r.res.PeerKeyFrom = true, d.Noise, d.PeerKeyFrom
 		r.res.HopIntervalMs = ptr(ms(d.HopInterval))
 		r.res.ClockOffsetMs, r.res.ClockDriftPPM = ms(d.ClockOffset), d.ClockDriftPPM
 	}
@@ -288,4 +294,3 @@ func (r *runner) logf(format string, args ...any) {
 		r.cfg.Logf("[%c] "+format, append([]any{r.cfg.Role}, args...)...)
 	}
 }
-

@@ -125,6 +125,7 @@ func (r *runner) onPeerInfo(m inbound) {
 		return
 	}
 	r.peerInfo, r.peerRdv = true, peer
+	r.rdvKey = append([]byte(nil), wire.PeerKey(m.pkt.Body)...)
 	r.res.RdvAddr, r.res.PeerRdvAddr = ptr(self.String()), ptr(peer.String())
 	r.res.RendezvousMs = ptr(ms(m.at))
 	if r.stunGot.IsValid() {
@@ -250,4 +251,3 @@ func (r *runner) waitAt(w barrierWait) error {
 	}
 	return nil
 }
-

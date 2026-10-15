@@ -1,12 +1,12 @@
 package peer
 
 import (
-	"bytes"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
+	"p2ptestbed/p2p/internal/direct"
 	"p2ptestbed/p2p/internal/rendezvous"
 	"p2ptestbed/p2p/internal/stun"
 )
@@ -18,18 +18,43 @@ func TestLoopback(t *testing.T) {
 	checkResults(t, results)
 }
 
+// Each role's static keypair, made once for all tests.
+var testKeys = func() map[byte]direct.Keypair {
+	keys := map[byte]direct.Keypair{}
+	for _, role := range []byte{'a', 'b', 'x'} { // 'x' belongs to nobody in the trial
+		kp, err := direct.NewKeypair()
+		if err != nil {
+			panic(err)
+		}
+		keys[role] = kp
+	}
+	return keys
+}()
+
+// directConfig is a direct-mode setup; withKeys gives each peer its own key
+// and, with PeerKeyFrom "file", the other's public key.
+func directConfig(pattern, peerKeyFrom string) Config {
+	return Config{Direct: &DirectConfig{Noise: pattern, PeerKeyFrom: peerKeyFrom,
+		HandshakeTimeout: 2 * time.Second, HopInterval: 150 * time.Millisecond}}
+}
+
+func withKeys(c *Config) {
+	other := 'a' + 'b' - c.Role
+	c.Direct.Key = testKeys[c.Role]
+	if c.Direct.PeerKeyFrom == "file" {
+		c.Direct.PeerKey = testKeys[other].Public
+	}
+}
+
 // The same run through the direct channel: Noise handshake, then ping and
 // throughput over hopping ports. Short slots, so both the ping phase and each
 // throughput direction cross several hops.
 func TestLoopbackDirect(t *testing.T) {
-	results := runPair(t, Config{
-		Direct: &DirectConfig{PSK: bytes.Repeat([]byte{7}, 32),
-			HandshakeTimeout: 2 * time.Second, HopInterval: 150 * time.Millisecond},
-	})
+	results := runPair(t, directConfig("kk", "file"), withKeys)
 	checkResults(t, results)
 	for role, r := range results {
 		t.Logf("%c: hop stats %+v", role, r.Stats)
-		if !r.Direct || r.HandshakeMs == nil || r.HopPossible == nil || !*r.HopPossible ||
+		if !r.Direct || r.Noise != "kk" || r.HandshakeMs == nil || r.HopPossible == nil || !*r.HopPossible ||
 			!r.Hopping || !r.HopConnected {
 			t.Errorf("%c: direct channel not up: %+v", role, r)
 		}
@@ -40,21 +65,43 @@ func TestLoopbackDirect(t *testing.T) {
 	}
 }
 
-// With different keys the handshake must fail, and the run report it.
-func TestLoopbackDirectWrongPSK(t *testing.T) {
-	results := runPair(t, Config{
-		Direct: &DirectConfig{PSK: bytes.Repeat([]byte{7}, 32),
-			HandshakeTimeout: 300 * time.Millisecond, HopInterval: 150 * time.Millisecond},
-		StepTimeout: 500 * time.Millisecond,
-	}, func(c *Config) {
-		if c.Role == 'b' {
-			c.Direct.PSK = bytes.Repeat([]byte{8}, 32)
-		}
-	})
-	for role, r := range results {
-		if r.Error == "" || r.HopConnected {
-			t.Errorf("%c: expected a handshake failure, got error %q", role, r.Error)
-		}
+// The other patterns and key sources, including keys taken from the
+// rendezvous (which carries them in Register and PeerInfo).
+func TestLoopbackDirectPatterns(t *testing.T) {
+	for _, c := range []struct{ pattern, from string }{
+		{"ik", "file"}, {"ik", "rendezvous"}, {"xx", "rendezvous"}, {"xx", "none"},
+	} {
+		t.Run(c.pattern+"-"+c.from, func(t *testing.T) {
+			results := runPair(t, directConfig(c.pattern, c.from), withKeys)
+			for role, r := range results {
+				if r.Error != "" || !r.HopConnected || r.Noise != c.pattern || r.PeerKeyFrom != c.from {
+					t.Errorf("%c: error %q, hop_connected %v, noise %q, peer_key_from %q",
+						role, r.Error, r.HopConnected, r.Noise, r.PeerKeyFrom)
+				}
+			}
+		})
+	}
+}
+
+// A peer told to expect someone else's key must not complete the handshake,
+// and the run must say so.
+func TestLoopbackDirectWrongKey(t *testing.T) {
+	for _, pattern := range []string{"kk", "ik", "xx"} {
+		t.Run(pattern, func(t *testing.T) {
+			cfg := directConfig(pattern, "file")
+			cfg.Direct.HandshakeTimeout = 300 * time.Millisecond
+			cfg.StepTimeout = 500 * time.Millisecond
+			results := runPair(t, cfg, withKeys, func(c *Config) {
+				if c.Role == 'b' {
+					c.Direct.PeerKey = testKeys['x'].Public
+				}
+			})
+			for role, r := range results {
+				if r.Error == "" || r.HopConnected {
+					t.Errorf("%c: expected a handshake failure, got error %q", role, r.Error)
+				}
+			}
+		})
 	}
 }
 
@@ -63,11 +110,9 @@ func TestLoopbackDirectWrongPSK(t *testing.T) {
 // report hop_connected = false without an error, rather than b carrying on
 // alone and failing at a later step.
 func TestLoopbackDirectOneWay(t *testing.T) {
-	results := runPair(t, Config{
-		Direct: &DirectConfig{PSK: bytes.Repeat([]byte{7}, 32),
-			HandshakeTimeout: 2 * time.Second, HopInterval: 150 * time.Millisecond},
-		StepTimeout: 500 * time.Millisecond,
-	}, func(c *Config) {
+	cfg := directConfig("kk", "file")
+	cfg.StepTimeout = 500 * time.Millisecond
+	results := runPair(t, cfg, withKeys, func(c *Config) {
 		c.Direct.dropHopSends = c.Role == 'b'
 	})
 	for role, r := range results {
@@ -180,4 +225,3 @@ func listen(t *testing.T) *net.UDPConn {
 	t.Cleanup(func() { c.Close() })
 	return c
 }
-

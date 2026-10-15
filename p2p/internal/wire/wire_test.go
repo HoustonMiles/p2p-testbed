@@ -19,3 +19,17 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("addrs: got %v %v", s, p)
 	}
 }
+
+func TestPeerKey(t *testing.T) {
+	addrs := Addrs(netip.MustParseAddrPort("203.0.113.10:1"), netip.MustParseAddrPort("203.0.113.20:2"))
+	if PeerKey(addrs) != nil {
+		t.Fatal("key found in a body without one")
+	}
+	key := bytes.Repeat([]byte{7}, KeySize)
+	if got := PeerKey(append(addrs, key...)); !bytes.Equal(got, key) {
+		t.Fatalf("got %x", got)
+	}
+	if PeerKey(append(addrs, key[:5]...)) != nil {
+		t.Fatal("short key accepted")
+	}
+}
