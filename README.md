@@ -21,21 +21,22 @@ attackers across NAT types?
 
 | Part | State | Evidence |
 |---|---|---|
-| NAT routers: full cone, restricted, port-restricted, symmetric | done | `router/configure-router.sh` |
+| NAT routers: full cone, restricted, port-restricted, symmetric | done | `testbed/router/configure-router.sh` |
 | Carrier-grade NAT (optional, per side) | done | `cgn-a`, `cgn-b` |
 | Link emulation: latency, jitter, loss, uplink/downlink caps | done | netem + IFB on the home routers |
-| STUN server with RFC 5780 support | done | `stun/` (coturn, STUN-only) |
-| Smoke test and NAT verification scripts | done | `scripts/smoke_test.sh`, `scripts/verify_nat.sh` |
+| STUN server with RFC 5780 support | done | `testbed/stun/` (coturn, STUN-only) |
+| Smoke test and NAT verification | done | `p2prunner smoke`, `p2prunner verify` (`p2prunner/checks.py`) |
 | Experiment runner (matrix, state reset, resume, metadata) | done | `p2prunner/` |
 | Trial types `nat_verify`, `ping`, `command` | done | `p2prunner/trials.py` |
 | Analysis notebook | done | `analysis/results.ipynb` |
-| Raw UDP hole-punching baseline (STUN, rendezvous, punch, peer-to-peer RTT, throughput) | done, tests pass | `baseline/` (`punch`, `rendezvous`) |
+| Raw UDP hole-punching baseline (STUN, rendezvous, punch, peer-to-peer RTT, throughput) | done, tests pass | `p2p/` (`punch`, `rendezvous`) |
 | Rendezvous server in the testbed | done | `rendezvous` service, 203.0.113.101:7000 |
-| Direct channel: Noise handshake (NNpsk0), encrypted UDP transport with replay window | done, tests pass | `baseline/internal/direct/noise.go` |
-| Port-hopping: clock-based HKDF port schedule, early open + probing, drain-based close | done, tests pass | `baseline/internal/direct/schedule.go`, `hopper.go` |
-| `punch -direct`: handshake, port check, hopping, then ping + throughput through the hopper | done, tests pass | `baseline/internal/peer/`, `baseline/cmd/punch` |
+| Direct channel: Noise handshake (KK, IK or XX with static keys; `punch -genkey`), encrypted UDP transport with replay window | done, tests pass | `p2p/internal/direct/handshake.go`, `noise.go` |
+| Port-hopping: clock-based HKDF port schedule, early open + probing, drain-based close | done, tests pass | `p2p/internal/direct/schedule.go`, `hopper.go` |
+| `punch -direct`: handshake, port check, hopping, then ping + throughput through the hopper | done, tests pass | `p2p/internal/peer/`, `p2p/cmd/punch` |
 | Clock offset/drift flags | done | `punch -clock-offset`, `-clock-drift-ppm` |
-| Result summary scripts (standard library only) | done | `scripts/hop_summary.py`, `scripts/compare_runs.py` |
+| Result reports (standard library only) | done | `p2prunner hops`, `p2prunner compare` (`p2prunner/reports.py`) |
+| Tests: Go unit + fuzz tests beside the code, Python `unittest` in `tests/` | done | see Testing |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
 | **Result:** path baseline | 180/180 trials; RTT within 0.4 ms of target, jitter matches netem theory | `results/path_baseline/20261009-175144` |
 | **Result:** punch matrix (raw baseline) | 320/320 trials; 24/32 configurations punch, exactly as RFC 4787 predicts | `results/punch_matrix/20261012-124540` |
@@ -60,7 +61,7 @@ NAT processing overhead (the testbed's noise floor).
 `hop_matrix` (all 16 pairings x side B on the WAN or behind CGNAT, coast
 profile, 1 s slots, `-hop-force`), with `hop_matrix_oneway` rerunning the 6
 configurations that crashed before the hopping barrier waited for an ack.
-Summarised with `scripts/hop_summary.py`.
+Summarised with `p2prunner hops`.
 
 | Group | Configurations | Result |
 |---|---|---|
@@ -78,7 +79,7 @@ layers keep the source port (see Paper updates: threats to validity).
 
 `direct_path` against `punch_path`, realistic pairing (port-restricted on
 both sides), 50 Mbit/s links, 60 Mbit/s offered per direction, 1 s slots.
-Medians of 10 trials, both sides. Compared with `scripts/compare_runs.py`.
+Medians of 10 trials, both sides. Compared with `p2prunner compare`.
 
 | Profile | RTT p50 raw / direct | rx_ip_mbit raw / direct | rx_mbit raw / direct | rx_loss raw / direct | Handshake |
 |---|---|---|---|---|---|
@@ -120,6 +121,10 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 
 ### Paper updates pending
 
+- Procedures: the rendezvous is UDP, not WebSocket (it must see each peer's
+  public UDP mapping for the punch); it carries the static public keys. The
+  handshake is Noise KK, IK or XX (`-noise`), matching the "peers already
+  in a network" or "first contact" assumption.
 - Methodology: describe the testbed as built (CGNAT, RFC 4787 names for the
   NAT types, half the RTT per direction, downlink cap before the NAT, RFC 5780
   verification run without packet loss).
@@ -170,9 +175,11 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 ```bash
 ./scripts/host_setup.sh                 # once per boot (uses sudo)
 docker compose up -d --build --wait     # build (incl. the Go tools) and start
-./scripts/smoke_test.sh                 # sanity check (seconds)
-./scripts/verify_nat.sh                 # RFC 5780 check of the running NAT types (~10 s)
-./scripts/verify_nat.sh --all           # check every NAT type and CGNAT (~1 min)
+docker compose exec peer-a punch -genkey /keys/a   # once: static Noise keys for -direct,
+docker compose exec peer-b punch -genkey /keys/b   #   kept in ./keys (not in git)
+uv run python -m p2prunner smoke        # sanity check (seconds)
+uv run python -m p2prunner verify       # RFC 5780 check of the running NAT types (~10 s)
+uv run python -m p2prunner verify --all # check every NAT type and CGNAT (~1 min)
 docker compose down -t 1                # tear down
 ```
 
@@ -216,8 +223,8 @@ A side's public IP is its home router's WAN IP, or its CGN's WAN IP when
 ## How the NAT types are built
 
 All NAT behaviour comes from the Linux kernel (netfilter/conntrack), the same
-code most real home routers run. See `router/configure-router.sh`.
-`scripts/verify_nat.sh` confirms each type with the RFC 5780 tests.
+code most real home routers run. See `testbed/router/configure-router.sh`.
+`p2prunner verify` confirms each type with the RFC 5780 tests.
 
 | Type | Mapping | Inbound allowed from | How |
 |---|---|---|---|
@@ -274,7 +281,13 @@ uv run python -m p2prunner plan experiments/path_baseline.toml   # configuration
 uv run python -m p2prunner run  experiments/path_baseline.toml   # run it
 uv run python -m p2prunner run  experiments/path_baseline.toml --runs 2   # quick test
 uv run python -m p2prunner run --resume results/path_baseline/<time>      # continue after Ctrl+C
+uv run python -m p2prunner smoke                 # testbed wiring check
+uv run python -m p2prunner verify [--all]        # NAT behaviour check
 ```
+
+The smoke test and the NAT verification live in `p2prunner/checks.py`, and
+use the same NAT expectations as the `nat_verify` trial, so the checks and
+the experiments cannot disagree.
 
 For an overnight run, start it inside `tmux` (or `nohup ... &`) so closing the
 terminal doesn't stop it.
@@ -296,7 +309,6 @@ bundle several settings under one name. Matrix keys: `nat_a`, `nat_b`,
 | `hop_matrix_oneway` | The 6 `hop_matrix` pairings with one symmetric side that can still punch (~20 min) |
 | `direct_path` | Experiment B: `punch_path` through the direct channel, realistic pairing x 3 distances (~10 min) |
 | `direct_path_overlap` | `direct_path` with `-hop-overlap 400ms`, the test that found the overlap problem (~10 min) |
-| `example_command` | Template for running your own programs on the peers |
 
 **Trial types:** `nat_verify` (RFC 5780 check), `ping` (RTT from both peers to
 a WAN host), and `command`, which runs `cmd_a`/`cmd_b` on the peers. Each command
@@ -324,8 +336,8 @@ prints one JSON object on its last line, and its keys become result columns
 
 ## Raw UDP hole-punching baseline
 
-`baseline/` is a Go module with two programs, compiled into the peer image
-(`host/Dockerfile` runs `go vet` and `go test` during the build):
+`p2p/` is a Go module with two programs, compiled into the peer image
+(`testbed/host/Dockerfile` runs `go vet` and `go test` during the build):
 
 - `rendezvous` runs as the `rendezvous` service and introduces the two peers
   of each session to each other. It never relays their traffic.
@@ -379,11 +391,13 @@ and those pairings need the relay.
 
 `punch -direct` runs the same steps and reports the same columns as the raw
 baseline, but after the punch it moves to the encrypted, port-hopping
-channel in `baseline/internal/direct/`:
+channel in `p2p/internal/direct/`:
 
-- `noise.go`: Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s handshake over the
-  punched socket (the pre-shared key stops a man in the middle at the
-  rendezvous), then a UDP transport with explicit nonces and a 2048-packet
+- `handshake.go`, `keys.go`: Noise handshake over the punched socket
+  (X25519, ChaChaPoly, BLAKE2s) with each peer's static key; the pattern is
+  chosen with `-noise` (below). Both sides resend until done, so lost or
+  repeated handshake packets are harmless.
+- `noise.go`: the UDP transport, with explicit nonces and a 2048-packet
   replay window. The hop key is derived from the session keys.
 - `schedule.go`: time is cut into slots of `-hop-interval`; each side's port
   for each slot is HKDF(hop key, role, slot), from the range 10000-32767
@@ -394,6 +408,24 @@ channel in `baseline/internal/direct/`:
   drained: after `-hop-min-overlap`, as soon as traffic has moved to the new
   port and the old one has been quiet for `-hop-drain-idle`, and at the
   latest after `-hop-overlap`.
+
+**Handshake patterns and keys.** Each peer has a static keypair in `./keys`
+(mounted at `/keys`; make them with `punch -genkey /keys/a` and `/keys/b`).
+The rendezvous passes each peer's public key to the other with the
+addresses, for the setups that take keys from it.
+
+| `-noise` | Peers know beforehand | Fits | `-peer-key` |
+|---|---|---|---|
+| `kk` (default) | each other's key | peers already in a network | a file (default `/keys/<other>.pub`) |
+| `ik` | the initiator knows the responder's key | known network, WireGuard-style; 1 round trip | a file, or `rendezvous` |
+| `xx` | nothing; keys travel in the handshake | first contact; 1.5 round trips | `rendezvous` (checked against it) or `none` (trust on first use) |
+
+All three authenticate both peers and give forward secrecy. `-peer-key
+rendezvous` trusts the rendezvous not to swap keys; a key file does not.
+A peer that presents an unexpected key is rejected, and an impostor cannot
+block the real initiator (the responder starts over). In the testbed both
+peers can read both private keys in `./keys`; attacker containers must not
+mount it.
 
 Steps added after the punch: Noise handshake; a barrier carrying each side's
 port check (does its NAT keep the local port); if both do (or `-hop-force`),
@@ -410,7 +442,10 @@ docker compose exec peer-b punch -role b -session 42 -direct -hop-interval 1s
 | Flag | Default | Meaning |
 |---|---|---|
 | `-direct` | off | use the direct channel |
-| `-psk` | derived from `-session` | 64 hex digits, the same on both peers. The default is a testbed convenience only: anyone who knows the session ID knows the key. Pass a random one for attack experiments. |
+| `-noise` | `kk` | handshake pattern: `kk`, `ik` or `xx` (see above) |
+| `-key` | `/keys/<role>.key` | this peer's static key |
+| `-peer-key` | `/keys/<other role>.pub` | the peer's public key file, `rendezvous` or `none` |
+| `-genkey BASE` | | write `BASE.key` and `BASE.pub`, then exit |
 | `-hop-interval` | 1s | slot length |
 | `-hop-lead` | interval/10 | open the next port this early |
 | `-hop-min-overlap` | interval/10 | keep the old port at least this long (with `-hop-lead`, the clock tolerance) |
@@ -419,7 +454,7 @@ docker compose exec peer-b punch -role b -session 42 -direct -hop-interval 1s
 | `-hop-force` | off | hop even when a NAT changes ports, to measure the failure |
 | `-clock-offset`, `-clock-drift-ppm` | 0 | skew this peer's hop clock |
 
-Extra result columns: `direct`, `handshake_ms`, `keeps_port`,
+Extra result columns: `direct`, `noise`, `peer_key_from`, `handshake_ms`, `keeps_port`,
 `peer_keeps_port`, `hop_possible`, `hopping`, `hop_connected`,
 `hop_interval_ms`, `clock_offset_ms`, `clock_drift_ppm`, and the hopper's
 counters, all prefixed `hop_`:
@@ -437,6 +472,25 @@ counters, all prefixed `hop_`:
 
 `rx_ip_mbit` also counts the 25 bytes Noise adds per packet in direct mode.
 
+## Testing
+
+| What | Where | Run |
+|---|---|---|
+| Go unit tests | `_test.go` files beside the code (`p2p/`) | `cd p2p && go test -race ./...` |
+| Go fuzz tests for everything that parses network input | `fuzz_test.go` in `wire`, `stun`, `direct` | `cd p2p && go test -fuzz=FuzzOpen -fuzztime=1m ./internal/direct` (one fuzz target per run) |
+| Python tests for the runner, checks and reports (fake testbed, no Docker) | `tests/` | `python3 -m unittest` (from the repo root) |
+| The real testbed | | `p2prunner smoke`, `p2prunner verify`, then a short experiment run |
+
+`go test` without `-fuzz` runs each fuzz target on its saved inputs only
+(`testdata/fuzz/`), so the fuzzers' past finds stay as regression tests. The
+Docker build runs `go vet` and `go test` too, so an image never ships code
+that fails its tests. On NixOS without Go installed:
+`nix-shell -p go --run "cd p2p && go test ./..."`.
+
+Fuzz targets: `wire.FuzzParse`, `wire.FuzzParseAddrs`, `stun.FuzzParse`,
+`direct.FuzzOpen` (nothing forged authenticates), `direct.FuzzHandshake`,
+`direct.FuzzReplayWindow` (the ring bitmap against a plain map).
+
 ## Analysis
 
 ```bash
@@ -448,15 +502,15 @@ table, the path-baseline summary and RTT chart, the hole-punching success
 matrix, the punched-path RTT and throughput, and the columns of any other
 `command` experiment.
 
-Two summary scripts need only Python's standard library (no numpy/pandas,
-so no NixOS setup):
+Two reports need only Python's standard library (no numpy/pandas, so no
+NixOS setup):
 
 ```bash
 # Experiment A: hop success per pairing; later runs replace earlier ones per configuration
-python3 scripts/hop_summary.py results/hop_matrix/<run> results/hop_matrix_oneway/<run>
+uv run python -m p2prunner hops results/hop_matrix/<run> results/hop_matrix_oneway/<run>
 
 # any two runs of the same configurations, e.g. Experiment B: raw vs direct
-python3 scripts/compare_runs.py results/punch_path/<run> results/direct_path/<run>
+uv run python -m p2prunner compare results/punch_path/<run> results/direct_path/<run>
 ```
 
 Replace `<run>` with the run's folder name (e.g. `20261012-132335`); typed
@@ -470,4 +524,3 @@ libraries in standard Linux locations. Add `programs.nix-ld.enable = true;` to
 ```bash
 LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH uv run --group analysis jupyter lab analysis/results.ipynb
 ```
-

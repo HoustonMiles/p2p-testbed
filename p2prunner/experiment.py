@@ -139,25 +139,9 @@ def expand_matrix(matrix: dict) -> list[Config]:
       - a list of tables ("bundles"), each with a "name" and several settings.
     The configurations are every combination (Cartesian product) of the keys.
     """
-    axes = []  # one list per matrix key; each entry is (bundle_info, settings)
-    varied = []  # matrix keys given as plain values (bundles are named instead)
-    for key, values in matrix.items():
-        if not isinstance(values, list) or not values:
-            raise ValueError(f"matrix.{key} must be a non-empty list")
-        options = []
-        for v in values:
-            if isinstance(v, dict):                       # a bundle
-                v = dict(v)
-                name = str(v.pop("name", f"{key}{len(options)}"))
-                _check_settings(v, where=f"matrix.{key}[{name}]")
-                options.append(({key: name}, v))
-            else:                                         # a plain value
-                _check_settings({key: v}, where=f"matrix.{key}")
-                options.append(({}, {key: v}))
-                if key not in varied:
-                    varied.append(key)
-        axes.append(options)
-
+    axes = [axis_options(key, values) for key, values in matrix.items()]
+    # Keys given as plain values appear in the label; bundles are named instead.
+    varied = tuple(key for key, values in matrix.items() if any(not isinstance(v, dict) for v in values))
     configs = []
     for i, combo in enumerate(itertools.product(*axes) if axes else [()]):
         factors = {k: default for k, (_, default) in FACTORS.items()}
@@ -165,8 +149,25 @@ def expand_matrix(matrix: dict) -> list[Config]:
         for bundle_info, settings in combo:
             bundles.update(bundle_info)
             factors.update({k: str(v) for k, v in settings.items()})
-        configs.append(Config(index=i, factors=factors, bundles=bundles, varied=tuple(varied)))
+        configs.append(Config(index=i, factors=factors, bundles=bundles, varied=varied))
     return configs
+
+
+def axis_options(key: str, values) -> list[tuple[dict, dict]]:
+    """One matrix key's options, each as (bundle name if any, settings)."""
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"matrix.{key} must be a non-empty list")
+    options = []
+    for v in values:
+        if isinstance(v, dict):
+            v = dict(v)
+            name = str(v.pop("name", f"{key}{len(options)}"))
+            _check_settings(v, where=f"matrix.{key}[{name}]")
+            options.append(({key: name}, v))
+        else:
+            _check_settings({key: v}, where=f"matrix.{key}")
+            options.append(({}, {key: v}))
+    return options
 
 
 def _check_settings(settings: dict, where: str) -> None:

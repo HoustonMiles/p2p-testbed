@@ -1,4 +1,4 @@
-# The host image is built from the repository root (it needs baseline/ for the
+# The host image is built from the repository root (it needs p2p/ for the
 # Go tools). Keep everything it doesn't need out of the build context, so
 # builds stay fast and results never end up inside an image.
 .git
@@ -12,3 +12,4 @@ scripts
 **/.ipynb_checkpoints
 *.md
 .env
+tests
