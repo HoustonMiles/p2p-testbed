@@ -28,10 +28,11 @@ func (r *runner) measure() error {
 	if r.cfg.RateMbit <= 0 {
 		return nil
 	}
-	if err := r.throughput(stepAtoB, 'a'); err != nil {
+	first := r.id < r.peerID.Load()
+	if err := r.throughput(stepFirstSend, first); err != nil {
 		return err
 	}
-	return r.throughput(stepBtoA, 'b')
+	return r.throughput(stepSecondSend, !first)
 }
 
 func (r *runner) pingPhase() {
@@ -85,16 +86,16 @@ func setRTTStats(res *Result, samples []float64) {
 
 // throughput runs one direction. The receiver waits at the barrier while
 // the sender sends; the barrier value carries how many packets were sent.
-func (r *runner) throughput(step uint64, sender byte) error {
+func (r *runner) throughput(step uint64, weSend bool) error {
 	var sent uint64
-	if sender == r.cfg.Role {
+	if weSend {
 		sent = r.sendData()
 	}
 	if err := r.barrier(step, sent, r.cfg.Duration+r.cfg.StepTimeout); err != nil {
 		return err
 	}
 	r.pump(r.cfg.Drain, 0, nil, never)
-	if sender != r.cfg.Role {
+	if !weSend {
 		r.recordRx(int64(r.peerValue[step]))
 	}
 	return nil
@@ -105,7 +106,7 @@ func (r *runner) throughput(step uint64, sender byte) error {
 func (r *runner) sendData() uint64 {
 	size := max(r.cfg.Size, wire.HeaderLen)
 	pps := r.cfg.RateMbit * 1e6 / float64(size*8)
-	pkt := wire.Packet{Type: wire.Data, Role: r.cfg.Role, Session: r.cfg.Session,
+	pkt := wire.Packet{Type: wire.Data, Room: r.cfg.Room, From: r.id,
 		Body: make([]byte, size-wire.HeaderLen)}.Append(nil)
 	var sent uint64
 	start := time.Now()
@@ -113,7 +114,7 @@ func (r *runner) sendData() uint64 {
 		func() {
 			due := uint64(math.Min(time.Since(start).Seconds(), r.cfg.Duration.Seconds()) * pps)
 			for ; sent < due; sent++ {
-				putSeq(pkt, sent)
+				wire.PutSeq(pkt, sent)
 				r.sendDataPacket(pkt)
 			}
 		},
@@ -131,13 +132,6 @@ func (r *runner) sendDataPacket(pkt []byte) {
 		r.hopper.Send(pkt)
 	} else {
 		r.conn.WriteToUDPAddrPort(pkt, r.remote)
-	}
-}
-
-// putSeq writes seq into the header's sequence field (bytes 16-23).
-func putSeq(pkt []byte, seq uint64) {
-	for i := 0; i < 8; i++ {
-		pkt[16+i] = byte(seq >> (56 - 8*i))
 	}
 }
 
@@ -193,4 +187,3 @@ func percentile(sorted []float64, p float64) float64 {
 func ms(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 
 func ptr[T any](v T) *T { return &v }
-

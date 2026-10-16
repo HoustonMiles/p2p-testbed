@@ -88,7 +88,7 @@ func (r *runner) newHandshake() (*direct.Handshake, error) {
 		Initiator: initiator,
 		Static:    r.cfg.Direct.Key,
 		PeerKey:   peerKey,
-		Prologue:  append([]byte("p2ptestbed direct v2"), wire.U64(r.cfg.Session)...),
+		Prologue:  append([]byte("p2ptestbed direct v2"), wire.U64(r.cfg.Room)...),
 	})
 }
 
@@ -97,7 +97,7 @@ func (r *runner) newHandshake() (*direct.Handshake, error) {
 func (r *runner) expectedPeerKey() ([]byte, error) {
 	switch d := r.cfg.Direct; d.PeerKeyFrom {
 	case "file":
-		return d.PeerKey, nil
+		return r.trustedPeerKey()
 	case "rendezvous":
 		if r.rdvKey == nil {
 			return nil, fmt.Errorf("the rendezvous announced no key for the peer")
@@ -108,6 +108,23 @@ func (r *runner) expectedPeerKey() ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unknown peer key source %q", d.PeerKeyFrom)
 	}
+}
+
+// trustedPeerKey is the trusted key the rendezvous says the peer has. The
+// handshake then proves the peer holds it, so a lying rendezvous can only
+// make the handshake fail. With one trusted key, the rendezvous is not
+// needed at all.
+func (r *runner) trustedPeerKey() ([]byte, error) {
+	trusted := r.cfg.Direct.TrustedKeys
+	if r.rdvKey == nil && len(trusted) == 1 {
+		return trusted[0], nil
+	}
+	for _, k := range trusted {
+		if bytes.Equal(k, r.rdvKey) {
+			return k, nil
+		}
+	}
+	return nil, fmt.Errorf("the peer's key %x is not one of the %d trusted keys", r.rdvKey, len(trusted))
 }
 
 // initiates reports whether we start the handshake. Ordering by static key

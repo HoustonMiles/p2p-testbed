@@ -2,10 +2,11 @@
 // steps at the same time, meeting at a barrier between steps:
 //
 //  1. STUN        our public address, as one server sees it (reported only)
-//  2. Rendezvous  register until the server introduces the other peer
+//  2. Rendezvous  register in the room until the server introduces a peer
 //  3. Punch       punch until a PunchAck proves the path works both ways
 //  4. Ping        both peers ping each other
-//  5. Throughput  a sends to b at RateMbit for Duration, then b to a
+//  5. Throughput  the peer with the lower ID sends at RateMbit for Duration,
+//     then the other
 //
 // With Config.Direct set, steps 4 and 5 run over the Port-Hopping Direct
 // Channel (package direct) instead of plain UDP: after the punch the peers
@@ -15,15 +16,23 @@
 // Everything before hopping uses ONE socket, because the NAT mapping the
 // rendezvous server sees is the one the peers punch through.
 //
+// TODO(paper §5, mesh step 3): this runs ONE link, with the first member
+// the rendezvous introduces. A link manager will run one per member, keep
+// registering while it runs, and drop links on PeerLeft.
+//
 // TODO(paper §5 Relayed Mode): add a relay mode that runs steps 4 and 5
 // through the coturn relay (203.0.113.102) with the same Noise transport.
 package peer
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"p2ptestbed/p2p/internal/direct"
@@ -32,8 +41,8 @@ import (
 )
 
 type Config struct {
-	Role       byte   // 'a' or 'b'
-	Session    uint64 // shared by both peers of one trial
+	Name       string // label for logs and results, e.g. "a"
+	Room       uint64 // shared by the peers that should meet (in the testbed, the trial seed)
 	Local      string // local UDP address to bind, e.g. ":0"
 	STUN       string // host:port; "" skips step 1
 	Rendezvous string
@@ -65,7 +74,7 @@ type Config struct {
 type DirectConfig struct {
 	Noise            string         // handshake pattern: kk, ik or xx
 	Key              direct.Keypair // this peer's static key
-	PeerKey          []byte         // the peer's expected static key, with PeerKeyFrom "file"
+	TrustedKeys      [][]byte       // with PeerKeyFrom "file": the keys of the network's members
 	PeerKeyFrom      string         // "file", "rendezvous" (take the key it announces) or "none" (trust on first use)
 	HandshakeTimeout time.Duration  // 0: PunchTimeout
 	HopInterval      time.Duration  // required
@@ -83,10 +92,12 @@ type DirectConfig struct {
 // Result is the tool's JSON output. Pointers are null when a step did not
 // happen, so every trial has the same columns.
 type Result struct {
-	Role    string `json:"role"`
-	Session uint64 `json:"session"`
-	Local   string `json:"local"`
-	Error   string `json:"error"`
+	Name   string  `json:"name"`
+	Room   uint64  `json:"room"`
+	ID     string  `json:"id"`      // our peer ID, hex
+	PeerID *string `json:"peer_id"` // the member we linked with
+	Local  string  `json:"local"`
+	Error  string  `json:"error"`
 
 	// stun_addr and rdv_addr are the same socket seen by two servers; they
 	// differ behind an endpoint-dependent ("symmetric") NAT.
@@ -148,12 +159,12 @@ type Result struct {
 // Barrier steps must rise in the order they run: a peer answers a Barrier
 // for every step up to the one it has reached.
 const (
-	stepConnected = 1
-	stepSecured   = 2
-	stepHopping   = 3
-	stepPinged    = 4
-	stepAtoB      = 5
-	stepBtoA      = 6
+	stepConnected  = 1
+	stepSecured    = 2
+	stepHopping    = 3
+	stepPinged     = 4
+	stepFirstSend  = 5 // the lower ID sends
+	stepSecondSend = 6
 )
 
 type inbound struct {
@@ -173,6 +184,9 @@ type runner struct {
 
 	stunTx  stun.TxID
 	stunGot netip.AddrPort
+
+	id     uint64
+	peerID atomic.Uint64 // 0 until introduced; read by the reader goroutines
 
 	rdv       netip.AddrPort
 	rdvKey    []byte // the peer's static key, as the rendezvous announced it
@@ -218,9 +232,11 @@ func newRunner(cfg Config) *runner {
 		peerValue: map[uint64]uint64{},
 		acked:     map[uint64]bool{},
 		rtts:      map[uint64]float64{},
-		res: &Result{Role: string(cfg.Role), Session: cfg.Session,
+		id:        newID(cfg),
+		res: &Result{Name: cfg.Name, Room: cfg.Room,
 			RateMbit: cfg.RateMbit, PacketBytes: cfg.Size},
 	}
+	r.res.ID = idString(r.id)
 	if d := cfg.Direct; d != nil {
 		r.res.Direct, r.res.Noise, r.res.PeerKeyFrom = true, d.Noise, d.PeerKeyFrom
 		r.res.HopIntervalMs = ptr(ms(d.HopInterval))
@@ -264,8 +280,8 @@ func (r *runner) run() error {
 }
 
 func (r *runner) validate() error {
-	if r.cfg.Role != 'a' && r.cfg.Role != 'b' {
-		return errors.New("role must be a or b")
+	if r.cfg.Name == "" {
+		return errors.New("a peer name is required")
 	}
 	if r.cfg.Direct != nil && r.cfg.Direct.HopInterval <= 0 {
 		return errors.New("direct mode needs a hop interval")
@@ -292,6 +308,21 @@ func (r *runner) linger() { r.pump(r.cfg.Linger, 0, nil, never) }
 
 func (r *runner) logf(format string, args ...any) {
 	if r.cfg.Logf != nil {
-		r.cfg.Logf("[%c] "+format, append([]any{r.cfg.Role}, args...)...)
+		r.cfg.Logf("[%s] "+format, append([]any{r.cfg.Name}, args...)...)
 	}
 }
+
+// newID is this peer's ID on the wire: in direct mode the start of its
+// static key, so the ID names the key the handshake proves; random in raw
+// mode. Never 0, which marks the rendezvous server.
+func newID(cfg Config) uint64 {
+	var b [8]byte
+	if cfg.Direct != nil && len(cfg.Direct.Key.Public) >= len(b) {
+		copy(b[:], cfg.Direct.Key.Public)
+	} else {
+		rand.Read(b[:])
+	}
+	return max(binary.BigEndian.Uint64(b[:]), 1)
+}
+
+func idString(id uint64) string { return fmt.Sprintf("%016x", id) }

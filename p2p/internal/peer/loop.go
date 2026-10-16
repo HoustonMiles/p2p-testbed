@@ -38,7 +38,7 @@ func (r *runner) onHop(in direct.Inbound) {
 // queues everything else for the main loop.
 func (r *runner) deliver(m inbound, b []byte) {
 	p, ok := wire.Parse(b)
-	if !ok || p.Session != r.cfg.Session || p.Role == r.cfg.Role && p.Type != wire.PeerInfo {
+	if !ok || p.Room != r.cfg.Room || !r.accepts(p) {
 		return
 	}
 	if p.Type == wire.Data {
@@ -57,6 +57,15 @@ func (r *runner) deliver(m inbound, b []byte) {
 	case r.in <- m:
 	default:
 	}
+}
+
+// accepts packets from the rendezvous (ID 0) and from the member we were
+// introduced to; nothing from anyone before the introduction.
+func (r *runner) accepts(p wire.Packet) bool {
+	if p.Type == wire.PeerInfo || p.Type == wire.PeerLeft {
+		return p.From == 0
+	}
+	return p.From != 0 && p.From == r.peerID.Load()
 }
 
 func never() bool { return false }
@@ -119,22 +128,23 @@ func (r *runner) onSTUN(m inbound) {
 	}
 }
 
+// onPeerInfo links with the first member introduced; later ones are
+// ignored until the link manager (mesh step 3).
 func (r *runner) onPeerInfo(m inbound) {
-	self, peer, ok := wire.ParseAddrs(m.pkt.Body)
-	if !ok || m.from != r.rdv || r.peerInfo {
+	in, ok := wire.ParseIntro(m.pkt.Body)
+	if !ok || m.from != r.rdv || r.peerInfo || in.PeerID == r.id {
 		return
 	}
-	r.peerInfo, r.peerRdv = true, peer
-	r.rdvKey = append([]byte(nil), wire.PeerKey(m.pkt.Body)...)
-	r.res.RdvAddr, r.res.PeerRdvAddr = ptr(self.String()), ptr(peer.String())
+	r.peerInfo, r.peerRdv, r.remote = true, in.Peer, in.Peer
+	r.peerID.Store(in.PeerID)
+	r.rdvKey = append([]byte(nil), in.PeerKey...)
+	r.res.PeerID = ptr(idString(in.PeerID))
+	r.res.RdvAddr, r.res.PeerRdvAddr = ptr(in.Self.String()), ptr(in.Peer.String())
 	r.res.RendezvousMs = ptr(ms(m.at))
 	if r.stunGot.IsValid() {
-		r.res.MappingVaries = ptr(r.stunGot != self)
+		r.res.MappingVaries = ptr(r.stunGot != in.Self)
 	}
-	if !r.remote.IsValid() { // a Punch may already have taught us a better one
-		r.remote = peer
-	}
-	r.logf("rendezvous: we are %v, peer is %v", self, peer)
+	r.logf("rendezvous: we are %v, peer %016x is %v", in.Self, in.PeerID, in.Peer)
 }
 
 func (r *runner) onPunch(m inbound) {
@@ -210,12 +220,12 @@ func (r *runner) sendHop(p wire.Packet) {
 	if r.cfg.Direct.dropHopSends {
 		return
 	}
-	p.Role, p.Session = r.cfg.Role, r.cfg.Session
+	p.Room, p.From = r.cfg.Room, r.id
 	r.hopper.Send(p.Append(nil)) // errors count as loss
 }
 
 func (r *runner) sendTo(to netip.AddrPort, t wire.Type, seq uint64, body []byte) {
-	p := wire.Packet{Type: t, Role: r.cfg.Role, Session: r.cfg.Session, Seq: seq, Body: body}
+	p := wire.Packet{Type: t, Room: r.cfg.Room, From: r.id, Seq: seq, Body: body}
 	r.conn.WriteToUDPAddrPort(p.Append(nil), to)
 }
 

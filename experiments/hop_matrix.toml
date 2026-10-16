@@ -36,12 +36,11 @@ verify_nat = true
 [params]
 timeout_s = 60
 est_trial_s = 9           # failed hops wait out -step-timeout (10 s) first
-cmd_a = "punch -role a -session $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
-cmd_b = "punch -role b -session $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
+cmd_a = "punch -name a -room $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
+cmd_b = "punch -name b -room $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
 
 [matrix]
 nat_a = ["full_cone", "restricted", "port_restricted", "symmetric"]
 nat_b = ["full_cone", "restricted", "port_restricted", "symmetric"]
 upstream_b = ["wan", "cgnat"]
 net_profile = ["coast"]
-

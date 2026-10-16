@@ -67,7 +67,7 @@ class CommandTrialTest(unittest.TestCase):
 
         (cfg,) = expand_matrix({"net_profile": ["local"]})
         ctx = TrialContext(trial=0, seed=42)
-        params = {"cmd_a": "punch -session $seed", "cmd_b": "punch -session $seed"}
+        params = {"cmd_a": "punch -room $seed", "cmd_b": "punch -room $seed"}
         return trials.command(Peers(), cfg, params, ctx), ctx
 
     def test_columns_get_side_prefixes(self):

@@ -11,7 +11,7 @@ import (
 //
 //	go test -fuzz=FuzzParse -fuzztime=30s ./internal/wire
 func FuzzParse(f *testing.F) {
-	f.Add(Packet{Type: Ping, Role: 'a', Session: 1, Seq: 2, Body: U64(3)}.Append(nil))
+	f.Add(Packet{Type: Ping, Room: 1, From: 9, Seq: 2, Body: U64(3)}.Append(nil))
 	f.Add([]byte(Magic))
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, b []byte) {
@@ -22,12 +22,18 @@ func FuzzParse(f *testing.F) {
 	})
 }
 
-func FuzzParseAddrs(f *testing.F) {
-	f.Add(Addrs(netip.MustParseAddrPort("203.0.113.10:1"), netip.MustParseAddrPort("203.0.113.20:65535")))
+// A PeerInfo body that is accepted re-encodes to its prefix (a key of the
+// wrong length is dropped).
+func FuzzParseIntro(f *testing.F) {
+	in := Intro{Self: netip.MustParseAddrPort("203.0.113.10:1"),
+		Peer: netip.MustParseAddrPort("203.0.113.20:65535"), PeerID: 5}
+	f.Add(in.Append(nil))
+	in.PeerKey = bytes.Repeat([]byte{1}, KeySize)
+	f.Add(in.Append(nil))
 	f.Add([]byte{1, 2, 3})
 	f.Fuzz(func(t *testing.T, b []byte) {
-		self, peer, ok := ParseAddrs(b)
-		if ok && !bytes.Equal(Addrs(self, peer), b[:12]) {
+		got, ok := ParseIntro(b)
+		if ok && !bytes.HasPrefix(b, got.Append(nil)) {
 			t.Fatalf("accepted %x but re-encodes differently", b)
 		}
 	})

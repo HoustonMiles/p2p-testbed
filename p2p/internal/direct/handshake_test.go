@@ -2,6 +2,7 @@ package direct
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -159,6 +160,14 @@ func TestKeyFiles(t *testing.T) {
 	}
 	if info, _ := os.Stat(base + ".key"); info.Mode().Perm() != 0o600 {
 		t.Errorf("private key mode %v, want 0600", info.Mode().Perm())
+	}
+	os.WriteFile(filepath.Join(filepath.Dir(base), "b.pub"), []byte(hex.EncodeToString(testKey(2).Public)), 0o644)
+	trusted, err := ReadTrustedKeys(filepath.Dir(base), kp.Public)
+	if err != nil || len(trusted) != 1 || !bytes.Equal(trusted[0], testKey(2).Public) {
+		t.Fatalf("trusted keys from the directory, without our own: %x, %v", trusted, err)
+	}
+	if _, err := ReadTrustedKeys(base+".pub", kp.Public); err == nil {
+		t.Error("only our own key accepted as a trusted set")
 	}
 	os.WriteFile(base+".pub", []byte("abcd\n"), 0o644)
 	if _, err := ReadPublicKey(base + ".pub"); err == nil {

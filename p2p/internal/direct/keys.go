@@ -57,6 +57,30 @@ func ReadKeypair(path string) (Keypair, error) {
 // ReadPublicKey reads a .pub file.
 func ReadPublicKey(path string) ([]byte, error) { return readHexKey(path) }
 
+// ReadTrustedKeys reads one .pub file, or every .pub file in a directory:
+// the members of a network. The key except (our own, in a shared
+// directory) is left out.
+func ReadTrustedKeys(path string, except []byte) ([][]byte, error) {
+	paths := []string{path}
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		paths, _ = filepath.Glob(filepath.Join(path, "*.pub"))
+	}
+	var keys [][]byte
+	for _, p := range paths {
+		key, err := ReadPublicKey(p)
+		if err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(key, except) {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("%s: no public keys of other peers", path)
+	}
+	return keys, nil
+}
+
 func readHexKey(path string) ([]byte, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

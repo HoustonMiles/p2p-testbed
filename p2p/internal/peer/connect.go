@@ -61,7 +61,7 @@ func (r *runner) meetAtRendezvous() error {
 		func() { r.sendTo(r.rdv, wire.Register, 0, key) },
 		func() bool { return r.peerInfo })
 	if !ok {
-		return errors.New("no introduction from the rendezvous server (is the other peer running?)")
+		return errors.New("no introduction from the rendezvous server (is another member of the room running?)")
 	}
 	return nil
 }

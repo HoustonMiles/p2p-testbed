@@ -1,9 +1,10 @@
-// punch runs one side of a peer-to-peer trial on peer-a or peer-b: raw UDP
-// by default, the Port-Hopping Direct Channel with -direct.
+// punch runs one peer of a peer-to-peer trial: raw UDP by default, the
+// Port-Hopping Direct Channel with -direct. Peers meet in a room at the
+// rendezvous; the first member introduced becomes the link.
 //
-//	punch -role a -session 42      # on peer-a
-//	punch -role b -session 42      # on peer-b, at the same time
-//	punch -role a -session 42 -direct -hop-interval 1s
+//	punch -name a -room 42         # on peer-a
+//	punch -name b -room 42         # on peer-b, at the same time
+//	punch -name a -room 42 -direct -hop-interval 1s
 //	punch -genkey /keys/a          # write /keys/a.key and /keys/a.pub, then exit
 //
 // Progress goes to stderr; the last line of stdout is one JSON object with
@@ -26,7 +27,7 @@ import (
 func main() {
 	var c peer.Config
 	var d peer.DirectConfig
-	role := flag.String("role", "", "this peer's role: a or b (required)")
+	flag.StringVar(&c.Name, "name", "", "this peer's name, for logs, results and the default key file (required)")
 	connectFlags(&c)
 	measureFlags(&c)
 	useDirect := flag.Bool("direct", false, "run the Port-Hopping Direct Channel instead of raw UDP")
@@ -39,12 +40,11 @@ func main() {
 	if *genkey != "" {
 		os.Exit(writeKeypair(*genkey))
 	}
-	if len(*role) != 1 || !flagSet("session") {
-		usage("usage: punch -role a|b -session N [flags]")
+	if c.Name == "" || !flagSet("room") {
+		usage("usage: punch -name NAME -room N [flags]")
 	}
-	c.Role = (*role)[0]
 	if *useDirect {
-		if err := keys.load(&d, c.Role); err != nil {
+		if err := keys.load(&d, c.Name); err != nil {
 			usage(err.Error())
 		}
 		c.Direct = &d
@@ -69,12 +69,12 @@ func run(c peer.Config) int {
 // TODO(paper §5 Simulation Environment): these addresses mirror
 // docker-compose.yml; read them from the environment so they are defined once.
 func connectFlags(c *peer.Config) {
-	flag.Uint64Var(&c.Session, "session", 0, "session ID shared by both peers, e.g. the trial seed (required)")
+	flag.Uint64Var(&c.Room, "room", 0, "rendezvous room shared by the peers that should meet, e.g. the trial seed (required)")
 	flag.StringVar(&c.Local, "local", ":0", "local UDP address to bind")
 	flag.StringVar(&c.STUN, "stun", "203.0.113.100:3478", `STUN server ("" to skip)`)
 	flag.StringVar(&c.Rendezvous, "rendezvous", "203.0.113.101:7000", "rendezvous server")
 	flag.DurationVar(&c.STUNTimeout, "stun-timeout", 2*time.Second, "give up on STUN after this long")
-	flag.DurationVar(&c.RendezvousTimeout, "rendezvous-timeout", 15*time.Second, "wait this long for the other peer to register")
+	flag.DurationVar(&c.RendezvousTimeout, "rendezvous-timeout", 15*time.Second, "wait this long for another member of the room")
 	flag.DurationVar(&c.PunchTimeout, "punch-timeout", 10*time.Second, "give up hole punching after this long")
 	flag.DurationVar(&c.PunchInterval, "punch-interval", 50*time.Millisecond, "time between punch packets")
 	flag.DurationVar(&c.StepTimeout, "step-timeout", 10*time.Second, "wait this long for the other peer between steps")
@@ -120,28 +120,27 @@ type keySettings struct{ key, peerKey *string }
 
 func keyFlags() keySettings {
 	return keySettings{
-		key:     flag.String("key", "", "direct: this peer's static key file (default /keys/<role>.key)"),
-		peerKey: flag.String("peer-key", "", `direct: the peer's public key file (default /keys/<other role>.pub), or "rendezvous" to take the key the rendezvous announces, or "none" to trust it on first use (xx, ik responder)`),
+		key:     flag.String("key", "", "direct: this peer's static key file (default /keys/<name>.key)"),
+		peerKey: flag.String("peer-key", "/keys", `direct: the trusted peers' public keys: a .pub file or a directory of them; or "rendezvous" to take the key the rendezvous announces, or "none" to trust it on first use (xx, ik responder)`),
 	}
 }
 
 // load reads the key files into d. Make them with -genkey.
-func (k keySettings) load(d *peer.DirectConfig, role byte) error {
-	other := 'a' + 'b' - role
-	keyPath := orDefault(*k.key, fmt.Sprintf("/keys/%c.key", role))
+func (k keySettings) load(d *peer.DirectConfig, name string) error {
+	keyPath := orDefault(*k.key, fmt.Sprintf("/keys/%s.key", name))
 	kp, err := direct.ReadKeypair(keyPath)
 	if err != nil {
-		return fmt.Errorf("-key: %v (make one with: punch -genkey /keys/%c)", err, role)
+		return fmt.Errorf("-key: %v (make one with: punch -genkey /keys/%s)", err, name)
 	}
 	d.Key = kp
-	switch from := orDefault(*k.peerKey, fmt.Sprintf("/keys/%c.pub", other)); from {
-	case "rendezvous", "none":
-		d.PeerKeyFrom = from
-	default:
-		d.PeerKeyFrom = "file"
-		if d.PeerKey, err = direct.ReadPublicKey(from); err != nil {
-			return fmt.Errorf("-peer-key: %v", err)
-		}
+	switch from := *k.peerKey; from {
+		case "rendezvous", "none":
+			d.PeerKeyFrom = from
+		default:
+			d.PeerKeyFrom = "file"
+			if d.TrustedKeys, err = direct.ReadTrustedKeys(from, kp.Public); err != nil {
+				return fmt.Errorf("-peer-key: %v", err)
+			}
 	}
 	return nil
 }
