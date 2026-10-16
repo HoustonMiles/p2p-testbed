@@ -1,22 +1,17 @@
 package peer
 
 import (
-	"errors"
-	"fmt"
-	"net"
 	"net/netip"
-	"time"
-
-	"p2ptestbed/p2p/internal/stun"
 	"p2ptestbed/p2p/internal/wire"
+	"time"
 )
 
 // connect runs steps 1-3 and the barrier after them. It returns false
 // without an error when the punch fails, which is a result.
 func (r *runner) connect() (bool, error) {
 	var err error
-	if r.rdv, err = resolve(r.cfg.Rendezvous); err != nil {
-		return false, fmt.Errorf("rendezvous address: %w", err)
+	if r.rdv, err = r.rendezvousClient(); err != nil {
+		return false, err
 	}
 	if r.cfg.STUN != "" {
 		if err := r.doSTUN(); err != nil {
@@ -30,40 +25,6 @@ func (r *runner) connect() (bool, error) {
 		return false, nil
 	}
 	return true, r.barrier(stepConnected, 0, r.cfg.StepTimeout)
-}
-
-func (r *runner) doSTUN() error {
-	server, err := resolve(r.cfg.STUN)
-	if err != nil {
-		return err
-	}
-	r.stunTx = stun.NewTxID()
-	req := stun.Request(r.stunTx)
-	ok := r.pump(r.cfg.STUNTimeout, 250*time.Millisecond,
-		func() { r.conn.WriteToUDPAddrPort(req, server) },
-		func() bool { return r.stunGot.IsValid() })
-	if !ok {
-		return fmt.Errorf("no reply from %v", server)
-	}
-	r.res.STUNAddr = ptr(r.stunGot.String())
-	r.logf("stun: public address %v", r.stunGot)
-	return nil
-}
-
-// meetAtRendezvous registers (with our static key in direct mode, so the
-// rendezvous can pass it to the peer) until the peer is introduced.
-func (r *runner) meetAtRendezvous() error {
-	var key []byte
-	if r.cfg.Direct != nil {
-		key = r.cfg.Direct.Key.Public
-	}
-	ok := r.pump(r.cfg.RendezvousTimeout, 100*time.Millisecond,
-		func() { r.sendTo(r.rdv, wire.Register, 0, key) },
-		func() bool { return r.peerInfo })
-	if !ok {
-		return errors.New("no introduction from the rendezvous server (is another member of the room running?)")
-	}
-	return nil
 }
 
 // punch sends Punch until a PunchAck arrives. Behind an endpoint-dependent
@@ -96,11 +57,44 @@ func (r *runner) learn(from netip.AddrPort) {
 	r.remote = from
 }
 
-func resolve(hostport string) (netip.AddrPort, error) {
-	a, err := net.ResolveUDPAddr("udp4", hostport)
-	if err != nil {
-		return netip.AddrPort{}, err
+func (r *runner) onPunch(m inbound) {
+	r.res.PunchesRecv++
+	r.learn(m.from)
+	r.sendTo(m.from, wire.PunchAck, m.pkt.Seq, nil)
+}
+
+func (r *runner) onPunchAck(m inbound) {
+	r.learn(m.from)
+	if !r.gotAck {
+		r.gotAck, r.ackAt = true, m.at
 	}
-	ap := a.AddrPort()
-	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()), nil
+}
+
+// startDirect brings up the direct channel: Noise handshake, port check,
+// hopper, then a first hop proven both ways. It returns false without an
+// error when hopping cannot be used, which is a result.
+//
+// TODO(paper §5 Dynamic Handoff Mode): each false return here is where the
+// Handoff Manager should pivot to the relay instead of ending the run.
+func (r *runner) startDirect() (bool, error) {
+	if err := r.handshake(); err != nil {
+		return false, err
+	}
+	possible, err := r.checkPorts()
+	if err != nil {
+		return false, err
+	}
+	if !possible && !r.cfg.Direct.HopForce {
+		r.logf("hop: not possible (a NAT changes ports); the relay would take over")
+		return false, nil
+	}
+	if err := r.startHopper(); err != nil {
+		return false, err
+	}
+	if err := r.barrierBothWays(stepHopping, r.cfg.StepTimeout); err != nil {
+		r.logf("hop: no contact through the hopper: %v", err)
+		return false, nil
+	}
+	r.res.HopConnected = true
+	return true, nil
 }

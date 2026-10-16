@@ -1,20 +1,18 @@
-package direct
+package noise
 
-import (
-	"testing"
-)
+import "testing"
 
 // These run on every datagram the hopper receives from the peer's IP,
 // i.e. on attack traffic: none may panic, and nothing forged may pass.
 //
-//	go test -fuzz=FuzzOpen -fuzztime=30s ./internal/direct
+//	go test -fuzz=FuzzOpen -fuzztime=30s ./internal/noise
 
 // FuzzOpen: a datagram that was not sealed by the peer never authenticates.
 func FuzzOpen(f *testing.F) {
 	a, b := handshake(f)
-	real, _ := a.Seal(nil, TypeData, []byte("hello"))
+	real, _ := a.Seal(nil, typeData, []byte("hello"))
 	f.Add(real)
-	f.Add([]byte{TypeData})
+	f.Add([]byte{typeData})
 	f.Add(make([]byte, Overhead))
 	f.Fuzz(func(t *testing.T, pkt []byte) {
 		if _, _, err := b.Open(nil, pkt); err == nil && string(pkt) != string(real) {
@@ -70,11 +68,11 @@ func FuzzReplayWindow(f *testing.F) {
 // sometimes far ahead, sometimes back past the window.
 func jump(n uint64, s byte) uint64 {
 	switch {
-		case s < 200:
-			return n + uint64(s) - min(n, 100)
-		case s < 240:
-			return n + uint64(s)*50
-		default:
-			return n - min(n, windowBits+uint64(s))
+	case s < 200:
+		return n + uint64(s) - min(n, 100)
+	case s < 240:
+		return n + uint64(s)*50
+	default:
+		return n - min(n, windowBits+uint64(s))
 	}
 }

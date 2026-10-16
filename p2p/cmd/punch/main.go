@@ -20,7 +20,7 @@ import (
 	"os"
 	"time"
 
-	"p2ptestbed/p2p/internal/direct"
+	"p2ptestbed/p2p/internal/identity"
 	"p2ptestbed/p2p/internal/peer"
 )
 
@@ -128,19 +128,19 @@ func keyFlags() keySettings {
 // load reads the key files into d. Make them with -genkey.
 func (k keySettings) load(d *peer.DirectConfig, name string) error {
 	keyPath := orDefault(*k.key, fmt.Sprintf("/keys/%s.key", name))
-	kp, err := direct.ReadKeypair(keyPath)
+	kp, err := identity.ReadKeypair(keyPath)
 	if err != nil {
 		return fmt.Errorf("-key: %v (make one with: punch -genkey /keys/%s)", err, name)
 	}
 	d.Key = kp
 	switch from := *k.peerKey; from {
-		case "rendezvous", "none":
-			d.PeerKeyFrom = from
-		default:
-			d.PeerKeyFrom = "file"
-			if d.TrustedKeys, err = direct.ReadTrustedKeys(from, kp.Public); err != nil {
-				return fmt.Errorf("-peer-key: %v", err)
-			}
+	case "rendezvous", "none":
+		d.PeerKeyFrom = from
+	default:
+		d.PeerKeyFrom = "file"
+		if d.TrustedKeys, err = identity.ReadTrustedKeys(from, kp.Public); err != nil {
+			return fmt.Errorf("-peer-key: %v", err)
+		}
 	}
 	return nil
 }
@@ -153,9 +153,9 @@ func orDefault(v, def string) string {
 }
 
 func writeKeypair(base string) int {
-	kp, err := direct.NewKeypair()
+	kp, err := identity.NewKeypair()
 	if err == nil {
-		err = direct.WriteKeypair(base, kp)
+		err = identity.WriteKeypair(base, kp)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "genkey:", err)

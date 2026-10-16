@@ -1,3 +1,6 @@
+// Package direct is the Port-Hopping Direct Channel: a port schedule
+// derived from the session's hop key, and the Hopper that moves the
+// channel's sockets along it. Packets are sealed by a noise.Session.
 package direct
 
 import (
@@ -5,9 +8,17 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"p2ptestbed/p2p/internal/noise"
 	"sync"
 	"sync/atomic"
 	"time"
+)
+
+// Packet types. The type travels in the clear but is authenticated as part
+// of the associated data.
+const (
+	TypeData  byte = 1
+	TypeProbe byte = 2 // body: slot (u64), flags (u8)
 )
 
 // Hopper moves the channel from port to port on the Schedule. Around the
@@ -96,7 +107,7 @@ func NewHopper(cfg Config) (*Hopper, error) {
 		done:  make(chan struct{}),
 		first: cfg.Schedule.SlotAt(cfg.Schedule.Now()),
 	}
-	h.side, h.peerSide = cfg.Session.sides()
+	h.side, h.peerSide = sides(cfg.Session.Initiator())
 	h.step()
 	h.wg.Add(1)
 	go h.loop()
@@ -111,7 +122,7 @@ func (h *Hopper) Send(payload []byte) error {
 		h.stats.sendErrors.Add(1)
 		return ErrNoSocket
 	}
-	pkt, err := h.cfg.Session.Seal(make([]byte, 0, len(payload)+Overhead), TypeData, payload)
+	pkt, err := h.cfg.Session.Seal(make([]byte, 0, len(payload)+noise.Overhead), TypeData, payload)
 	if err == nil {
 		// Can race with the socket's close; that counts as a lost packet.
 		_, err = st.sock.conn.WriteToUDPAddrPort(pkt, netip.AddrPortFrom(h.cfg.PeerIP, st.peerPort))

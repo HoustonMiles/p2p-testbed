@@ -31,11 +31,12 @@ attackers across NAT types?
 | Analysis notebook | done | `analysis/results.ipynb` |
 | Raw UDP hole-punching baseline (STUN, rendezvous, punch, peer-to-peer RTT, throughput) | done, tests pass | `p2p/` (`punch`, `rendezvous`) |
 | Rendezvous server in the testbed | done | `rendezvous` service, 203.0.113.101:7000 |
-| Direct channel: Noise handshake (KK, IK or XX with static keys; `punch -genkey`), encrypted UDP transport with replay window | done, tests pass | `p2p/internal/direct/handshake.go`, `noise.go` |
-| Port-hopping: clock-based HKDF port schedule, early open + probing, drain-based close | done, tests pass | `p2p/internal/direct/schedule.go`, `hopper.go` |
+| Direct channel: Noise handshake (KK, IK or XX with static keys; `punch -genkey`), encrypted UDP transport with replay window | done, tests pass | `p2p/internal/noise/`, `p2p/internal/identity/` |
+| Port-hopping: clock-based HKDF port schedule, early open + probing, drain-based close | done, tests pass | `p2p/internal/direct/` |
 | `punch -direct`: handshake, port check, hopping, then ping + throughput through the hopper | done, tests pass | `p2p/internal/peer/`, `p2p/cmd/punch` |
 | Clock offset/drift flags | done | `punch -clock-offset`, `-clock-drift-ppm` |
-| Mesh step 1: the lower static key starts the handshake; the direct channel has no a/b roles | done, tests pass | `p2p/internal/peer/direct.go` (`initiates`), `p2p/internal/direct/schedule.go` (sides) |
+| Mesh step 1: the lower static key starts the handshake; the direct channel has no a/b roles | done, tests pass | `p2p/internal/peer/handshake.go` (`initiates`), `p2p/internal/direct/schedule.go` (sides) |
+| Mesh step 2: rendezvous rooms (any number of members, joins and leaves), peer IDs on the wire, trusted key directories | done, tests pass | `p2p/internal/rendezvous/`, `p2p/internal/wire/`, `punch -name -room`, `-peer-key DIR` |
 | Result reports (standard library only) | done | `p2prunner hops`, `p2prunner compare` (`p2prunner/reports.py`) |
 | Tests: Go unit + fuzz tests beside the code, Python `unittest` in `tests/` | done | see Testing |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
@@ -113,7 +114,7 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 
 | Part | What it is for |
 |---|---|
-| Full mesh, steps 2-5: group rendezvous (rooms instead of a/b sessions); a link manager with one handshake and hopper per neighbor, sharing sockets when two links pick the same port; an N-peer testbed with per-link results; a mesh experiment (time to full mesh, hop success per link as N grows, port clashes) | The paper's system is a mesh of pairwise direct links |
+| Full mesh, steps 3-5: a link manager with one handshake and hopper per neighbor, sharing sockets when two links pick the same port; an N-peer testbed with per-link results; a mesh experiment (time to full mesh, hop success per link as N grows, port clashes) | The paper's system is a mesh of pairwise direct links |
 | Relay baseline: coturn as a TURN relay in the testbed (203.0.113.102), `punch -relay`, `relay_path` experiment | The comparison baseline, and the path for pairings that cannot hop |
 | Handoff Manager | Falls back to the relay when `hop_possible` is false or hopping stops holding |
 | Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |
@@ -126,6 +127,11 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 - Scope: the system is a full mesh of pairwise direct links, each with its
   own Noise session, hop key and schedule (the proposal still speaks of "the
   two authenticated peers"). In each pair the lower static key initiates.
+  Peers meet in rendezvous rooms; "already in a network" means each peer
+  holds the members' public keys (a key directory).
+- Threat model: the rendezvous is unauthenticated, so anyone who knows a
+  room number learns its members' addresses (not their traffic: the
+  handshake still proves keys). Say so, or authenticate Register.
 - Procedures: the rendezvous is UDP, not WebSocket (it must see each peer's
   public UDP mapping for the punch); it carries the static public keys. The
   handshake is Noise KK, IK or XX (`-noise`), matching the "peers already
@@ -339,23 +345,58 @@ prints one JSON object on its last line, and its keys become result columns
 | `experiment.toml` | exact copy of the experiment that ran |
 | `raw/` | full details per trial (e.g. every RTT sample) |
 
+## Code layout
+
+`p2p/` is one Go module. Each folder is one part of the system, each
+protocol lives in one folder, and every folder keeps its tests beside its
+code (`_test.go`). Dependencies only point down this list.
+
+```
+p2p/
+  cmd/punch/          the peer program: flags -> peer.Run -> one JSON line
+  cmd/rendezvous/     the rendezvous program
+  internal/
+    peer/             one peer's run: socket.go (the one socket, dispatch), meet.go (STUN,
+                      rendezvous), link.go (punch -> secure -> hop), handshake.go, hop.go,
+                      barrier.go, measure.go, result.go; loopback_test.go runs whole trials
+    rendezvous/       rooms: server.go, and client.go (a member's side)
+    stun/             STUN messages
+    direct/           the port-hopping channel: schedule, hopper, slots, probe, drain, receive
+    noise/            Noise handshake, encrypted session, replay window
+    identity/         static keys and trusted-key directories
+    wire/             the packet format everything above shares
+```
+
+The protocol packages (`rendezvous`, `stun`, `noise`) never touch a socket:
+they build packets and interpret replies, and `peer` carries them, because
+every step before hopping must use the one socket whose NAT mapping the
+rendezvous saw.
+
 ## Raw UDP hole-punching baseline
 
 `p2p/` is a Go module with two programs, compiled into the peer image
 (`testbed/host/Dockerfile` runs `go vet` and `go test` during the build):
 
-- `rendezvous` runs as the `rendezvous` service and introduces the two peers
-  of each session to each other. It never relays their traffic.
+- `rendezvous` runs as the `rendezvous` service and introduces the members
+  of each room to each other: every Register is answered with one PeerInfo
+  per other member (its address, ID and key), and each of them is told about
+  the sender. A member not refreshed for `-ttl` (5 s) is dropped and the rest
+  of the room is sent PeerLeft. It never relays peer traffic.
 - `punch` runs on both peers at once, on one UDP socket: STUN, registration
-  with the rendezvous, hole punching (switching to the peer's real address
-  if its packets arrive from a different port), peer-to-peer pings, then
-  throughput a->b and b->a. It prints one JSON line of results at the end.
+  in the room, hole punching with the first member introduced (switching to
+  its real address if its packets arrive from a different port), peer-to-peer
+  pings, then throughput: the peer with the lower ID sends first, then the
+  other. It prints one JSON line of results at the end.
+
+Every packet carries the room and the sender's peer ID (the start of its
+static key in direct mode, random otherwise); a peer accepts packets only
+from the member it was introduced to.
 
 No encryption and no port-hopping: these numbers are the floor that the Noise
 channel and the relay are compared against.
 
 **Run it through the runner** (the normal way; the trial seed is used as the
-session ID, so both peers of a trial find each other):
+room, so both peers of a trial find each other):
 
 ```bash
 uv run python -m p2prunner run experiments/punch_matrix.toml   # which pairings connect (~1 h)
@@ -365,11 +406,12 @@ uv run python -m p2prunner run experiments/punch_path.toml     # RTT + throughpu
 **Run it by hand** for a single try, in two terminals at the same time:
 
 ```bash
-docker compose exec peer-a punch -role a -session 42
-docker compose exec peer-b punch -role b -session 42
+docker compose exec peer-a punch -name a -room 42
+docker compose exec peer-b punch -name b -room 42
 ```
 
-Use a new `-session` number for each try. `punch -h` lists every flag
+Use a new `-room` number for each try. `-name` labels the logs and results
+and names the default key file. `punch -h` lists every flag
 (timeouts, ping count, rate, duration, packet size).
 
 **Reading the results:**
@@ -396,19 +438,20 @@ and those pairings need the relay.
 
 `punch -direct` runs the same steps and reports the same columns as the raw
 baseline, but after the punch it moves to the encrypted, port-hopping
-channel in `p2p/internal/direct/`:
+channel:
 
-- `handshake.go`, `keys.go`: Noise handshake over the punched socket
-  (X25519, ChaChaPoly, BLAKE2s) with each peer's static key; the pattern is
-  chosen with `-noise` (below). Both sides resend until done, so lost or
-  repeated handshake packets are harmless.
-- `noise.go`: the UDP transport, with explicit nonces and a 2048-packet
-  replay window. The hop key is derived from the session keys.
-- `schedule.go`: time is cut into slots of `-hop-interval`; each side's port
+- `noise/handshake.go`: Noise handshake over the punched socket
+  (X25519, ChaChaPoly, BLAKE2s) with each peer's static key (`identity/`);
+  the pattern is chosen with `-noise` (below). Both sides resend until done,
+  so lost or repeated handshake packets are harmless.
+- `noise/session.go`, `noise/replay.go`: the UDP transport, with explicit
+  nonces and a 2048-packet replay window. The hop key is derived from the
+  session keys.
+- `direct/schedule.go`: time is cut into slots of `-hop-interval`; each side's port
   for each slot is HKDF(hop key, side, slot), from the range 10000-32767
   (below Linux's ephemeral ports), where side is initiator or responder.
   Nothing about the schedule is sent.
-- `hopper.go`: opens the next slot's port `-hop-lead` early and probes the
+- `direct/hopper.go` (with `slots.go`, `probe.go`, `drain.go`): opens the next slot's port `-hop-lead` early and probes the
   peer's next port until both directions work (the hole punch, repeated on
   every hop), sends on the current slot, and closes the old port once it has
   drained: after `-hop-min-overlap`, as soon as traffic has moved to the new
@@ -421,11 +464,13 @@ The rendezvous passes each peer's public key to the other with the
 addresses, for the setups that take keys from it. The peer with the lower
 public key initiates, so no peer needs to be told a role; with `-peer-key
 none` the key the rendezvous announced sets the order, and the handshake
-still authenticates whoever answers.
+still authenticates whoever answers. With a directory of trusted keys, the
+rendezvous's announcement picks which member's key the handshake must
+prove; a key outside the directory is refused before the handshake.
 
 | `-noise` | Peers know beforehand | Fits | `-peer-key` |
 |---|---|---|---|
-| `kk` (default) | each other's key | peers already in a network | a file (default `/keys/<other>.pub`) |
+| `kk` (default) | each other's key | peers already in a network | a file, or a directory of the members' keys (default `/keys`) |
 | `ik` | the initiator knows the responder's key | known network, WireGuard-style; 1 round trip | a file, or `rendezvous` |
 | `xx` | nothing; keys travel in the handshake | first contact; 1.5 round trips | `rendezvous` (checked against it) or `none` (trust on first use) |
 
@@ -444,16 +489,16 @@ not connect, is a result (`hop_possible` / `hop_connected` = false), not an
 error.
 
 ```bash
-docker compose exec peer-a punch -role a -session 42 -direct -hop-interval 1s
-docker compose exec peer-b punch -role b -session 42 -direct -hop-interval 1s
+docker compose exec peer-a punch -name a -room 42 -direct -hop-interval 1s
+docker compose exec peer-b punch -name b -room 42 -direct -hop-interval 1s
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `-direct` | off | use the direct channel |
 | `-noise` | `kk` | handshake pattern: `kk`, `ik` or `xx` (see above) |
-| `-key` | `/keys/<role>.key` | this peer's static key |
-| `-peer-key` | `/keys/<other role>.pub` | the peer's public key file, `rendezvous` or `none` |
+| `-key` | `/keys/<name>.key` | this peer's static key |
+| `-peer-key` | `/keys` | the trusted peers' keys: a `.pub` file, a directory of them (our own is skipped), `rendezvous` or `none` |
 | `-genkey BASE` | | write `BASE.key` and `BASE.pub`, then exit |
 | `-hop-interval` | 1s | slot length |
 | `-hop-lead` | interval/10 | open the next port this early |
@@ -462,6 +507,9 @@ docker compose exec peer-b punch -role b -session 42 -direct -hop-interval 1s
 | `-hop-drain-idle` | 50ms | quiet time that counts as drained |
 | `-hop-force` | off | hop even when a NAT changes ports, to measure the failure |
 | `-clock-offset`, `-clock-drift-ppm` | 0 | skew this peer's hop clock |
+
+Result columns added by mesh step 2: `name` and `room` (were `role` and
+`session`), `id`, `peer_id`.
 
 Extra result columns: `direct`, `noise`, `peer_key_from`, `initiator`, `handshake_ms`, `keeps_port`,
 `peer_keeps_port`, `hop_possible`, `hopping`, `hop_connected`,
@@ -486,7 +534,7 @@ counters, all prefixed `hop_`:
 | What | Where | Run |
 |---|---|---|
 | Go unit tests | `_test.go` files beside the code (`p2p/`) | `cd p2p && go test -race ./...` |
-| Go fuzz tests for everything that parses network input | `fuzz_test.go` in `wire`, `stun`, `direct` | `cd p2p && go test -fuzz=FuzzOpen -fuzztime=1m ./internal/direct` (one fuzz target per run) |
+| Go fuzz tests for everything that parses network input | `fuzz_test.go` in `wire`, `stun`, `noise` | `cd p2p && go test -fuzz=FuzzOpen -fuzztime=1m ./internal/noise` (one fuzz target per run) |
 | Python tests for the runner, checks and reports (fake testbed, no Docker) | `tests/` | `python3 -m unittest` (from the repo root) |
 | The real testbed | | `p2prunner smoke`, `p2prunner verify`, then a short experiment run |
 

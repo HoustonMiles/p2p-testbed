@@ -60,20 +60,6 @@ func (c *counters) snapshot() Stats {
 	}
 }
 
-// drainStats is guarded by Hopper.mu.
-type drainStats struct {
-	count, cutoffs uint64
-	total          time.Duration
-}
-
-func (d *drainStats) record(open time.Duration, cutoff bool) {
-	d.count++
-	d.total += open
-	if cutoff {
-		d.cutoffs++
-	}
-}
-
 // Stats returns a snapshot of the counters.
 func (h *Hopper) Stats() Stats {
 	st := h.stats.snapshot()
@@ -87,4 +73,3 @@ func (h *Hopper) Stats() Stats {
 }
 
 func ms(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
-

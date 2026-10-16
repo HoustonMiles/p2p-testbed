@@ -2,11 +2,10 @@ package peer
 
 import (
 	"math"
+	"p2ptestbed/p2p/internal/noise"
+	"p2ptestbed/p2p/internal/wire"
 	"sort"
 	"time"
-
-	"p2ptestbed/p2p/internal/direct"
-	"p2ptestbed/p2p/internal/wire"
 )
 
 // TODO(paper §5 Measures #4): record CPU usage per peer during throughput,
@@ -81,6 +80,15 @@ func setRTTStats(res *Result, samples []float64) {
 			v += (x - mean) * (x - mean)
 		}
 		res.RTTStdev = ptr(math.Sqrt(v / float64(len(s)-1)))
+	}
+}
+
+func (r *runner) onPing(m inbound) { r.reply(m, wire.Pong, m.pkt.Seq, m.pkt.Body) }
+
+func (r *runner) onPong(m inbound) {
+	sentAt := time.Duration(wire.ParseU64(m.pkt.Body))
+	if _, dup := r.rtts[m.pkt.Seq]; !dup && m.pkt.Seq < uint64(r.cfg.Pings) {
+		r.rtts[m.pkt.Seq] = ms(m.at - sentAt)
 	}
 }
 
@@ -172,7 +180,7 @@ func (r *runner) recordRx(peerSent int64) {
 
 func (r *runner) headerBytes() int64 {
 	if r.hopper != nil {
-		return ipUDPHeader + direct.Overhead
+		return ipUDPHeader + noise.Overhead
 	}
 	return ipUDPHeader
 }
@@ -183,7 +191,3 @@ func percentile(sorted []float64, p float64) float64 {
 	hi := min(lo+1, len(sorted)-1)
 	return sorted[lo] + (sorted[hi]-sorted[lo])*(k-float64(lo))
 }
-
-func ms(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
-
-func ptr[T any](v T) *T { return &v }

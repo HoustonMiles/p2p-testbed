@@ -1,0 +1,77 @@
+package peer
+
+import (
+	"p2ptestbed/p2p/internal/direct"
+	"time"
+)
+
+// Result is the tool's JSON output. Pointers are null when a step did not
+// happen, so every trial has the same columns.
+type Result struct {
+	Name   string  `json:"name"`
+	Room   uint64  `json:"room"`
+	ID     string  `json:"id"`      // our peer ID, hex
+	PeerID *string `json:"peer_id"` // the member we linked with
+	Local  string  `json:"local"`
+	Error  string  `json:"error"`
+
+	// stun_addr and rdv_addr are the same socket seen by two servers; they
+	// differ behind an endpoint-dependent ("symmetric") NAT.
+	STUNAddr        *string `json:"stun_addr"`
+	RdvAddr         *string `json:"rdv_addr"`
+	MappingVaries   *bool   `json:"mapping_varies"`
+	PeerRdvAddr     *string `json:"peer_rdv_addr"`
+	PeerAddr        *string `json:"peer_addr"`         // the address that worked
+	PeerAddrChanged *bool   `json:"peer_addr_changed"` // learned from its packets (peer-reflexive)
+
+	STUNMs       *float64 `json:"stun_ms"`
+	RendezvousMs *float64 `json:"rendezvous_ms"`
+	Punched      bool     `json:"punched"`
+	PunchMs      *float64 `json:"punch_ms"` // introduction to first PunchAck
+	PunchesSent  int      `json:"punches_sent"`
+	PunchesRecv  int      `json:"punches_recv"`
+
+	PingsSent int       `json:"pings_sent"`
+	PingsRecv int       `json:"pings_recv"`
+	PingLoss  *float64  `json:"ping_loss"`
+	RTTMean   *float64  `json:"rtt_ms_mean"`
+	RTTP50    *float64  `json:"rtt_ms_p50"`
+	RTTP95    *float64  `json:"rtt_ms_p95"`
+	RTTMin    *float64  `json:"rtt_ms_min"`
+	RTTMax    *float64  `json:"rtt_ms_max"`
+	RTTStdev  *float64  `json:"rtt_ms_stdev"`
+	RTTs      []float64 `json:"rtt_ms_samples"` // in ping order; lost pings omitted
+
+	// tx_* is what this side sent; rx_* what arrived here, so a's rx_* is
+	// the b->a direction.
+	RateMbit    float64  `json:"rate_mbit"`
+	PacketBytes int      `json:"packet_bytes"`
+	TxPackets   *int64   `json:"tx_packets"`
+	TxMbit      *float64 `json:"tx_mbit"`
+	RxPackets   *int64   `json:"rx_packets"`
+	RxPeerSent  *int64   `json:"rx_peer_sent"`
+	RxLoss      *float64 `json:"rx_loss"`
+	RxMbit      *float64 `json:"rx_mbit"`    // payload rate while packets arrived
+	RxIPMbit    *float64 `json:"rx_ip_mbit"` // the same, counting IP, UDP and Noise headers
+
+	Direct        bool     `json:"direct"`
+	Noise         string   `json:"noise"`
+	PeerKeyFrom   string   `json:"peer_key_from"`
+	Initiator     *bool    `json:"initiator"` // this side started the handshake (the lower static key)
+	HandshakeMs   *float64 `json:"handshake_ms"`
+	KeepsPort     *bool    `json:"keeps_port"` // STUN-mapped port == local port
+	PeerKeepsPort *bool    `json:"peer_keeps_port"`
+	HopPossible   *bool    `json:"hop_possible"`
+	Hopping       bool     `json:"hopping"`
+	HopConnected  bool     `json:"hop_connected"` // the first hop worked both ways
+	HopIntervalMs *float64 `json:"hop_interval_ms"`
+	ClockOffsetMs float64  `json:"clock_offset_ms"`
+	ClockDriftPPM float64  `json:"clock_drift_ppm"`
+	direct.Stats           // embedded: flat hop_* columns
+
+	TotalMs float64 `json:"total_ms"`
+}
+
+func ms(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+
+func ptr[T any](v T) *T { return &v }

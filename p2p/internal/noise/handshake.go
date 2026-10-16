@@ -1,15 +1,20 @@
-package direct
+// Package noise secures the direct channel: a Noise handshake (kk, ik or xx)
+// over the punched socket, then an encrypted UDP transport with explicit
+// nonces and a replay window. The session also derives the hop key that
+// package direct builds its port schedule from.
+package noise
 
 import (
 	"bytes"
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"p2ptestbed/p2p/internal/identity"
 
-	"github.com/flynn/noise"
+	flynn "github.com/flynn/noise"
 )
 
-var suite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.HashBLAKE2s)
+var suite = flynn.NewCipherSuite(flynn.DH25519, flynn.CipherChaChaPoly, flynn.HashBLAKE2s)
 
 // Patterns, by what the peers know of each other beforehand:
 //
@@ -21,17 +26,17 @@ var suite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.Ha
 // with ik on the responder side, the peer's key is checked against
 // PeerKey after the handshake reveals it; without a PeerKey it is trusted
 // on first use.
-var patterns = map[string]noise.HandshakePattern{
-	"kk": noise.HandshakeKK,
-	"ik": noise.HandshakeIK,
-	"xx": noise.HandshakeXX,
+var patterns = map[string]flynn.HandshakePattern{
+	"kk": flynn.HandshakeKK,
+	"ik": flynn.HandshakeIK,
+	"xx": flynn.HandshakeXX,
 }
 
 // HandshakeConfig for one side.
 type HandshakeConfig struct {
 	Pattern   string // kk, ik or xx
 	Initiator bool
-	Static    Keypair
+	Static    identity.Keypair
 	PeerKey   []byte // expected peer public key; required for kk and the ik initiator
 	Prologue  []byte // the same on both sides; names the trial so handshakes cannot be replayed into another
 }
@@ -40,7 +45,7 @@ func (c HandshakeConfig) validate() error {
 	if _, ok := patterns[c.Pattern]; !ok {
 		return fmt.Errorf("direct: unknown handshake pattern %q (want kk, ik or xx)", c.Pattern)
 	}
-	if len(c.Static.Private) != KeySize || len(c.Static.Public) != KeySize {
+	if len(c.Static.Private) != identity.KeySize || len(c.Static.Public) != identity.KeySize {
 		return errors.New("direct: a static keypair is required")
 	}
 	if c.PeerKey == nil && (c.Pattern == "kk" || c.Pattern == "ik" && c.Initiator) {
@@ -55,7 +60,7 @@ func (c HandshakeConfig) validate() error {
 // again (the reply was probably lost). Not safe for concurrent use.
 type Handshake struct {
 	cfg     HandshakeConfig
-	hs      *noise.HandshakeState
+	hs      *flynn.HandshakeState
 	lastIn  []byte // the peer's last message, to recognise repeats
 	last    []byte // our last message
 	session *Session
@@ -76,13 +81,13 @@ func (h *Handshake) reset() error {
 	if h.cfg.Pattern == "kk" || h.cfg.Pattern == "ik" && h.cfg.Initiator {
 		peer = h.cfg.PeerKey // these patterns use it inside the handshake
 	}
-	hs, err := noise.NewHandshakeState(noise.Config{
+	hs, err := flynn.NewHandshakeState(flynn.Config{
 		CipherSuite:   suite,
 		Random:        rand.Reader,
 		Pattern:       patterns[h.cfg.Pattern],
 		Initiator:     h.cfg.Initiator,
 		Prologue:      h.cfg.Prologue,
-		StaticKeypair: noise.DHKey{Private: h.cfg.Static.Private, Public: h.cfg.Static.Public},
+		StaticKeypair: flynn.DHKey{Private: h.cfg.Static.Private, Public: h.cfg.Static.Public},
 		PeerStatic:    peer,
 	})
 	h.hs, h.lastIn, h.last = hs, nil, nil
@@ -152,7 +157,7 @@ func (h *Handshake) write() ([]byte, error) {
 	return out, err
 }
 
-func (h *Handshake) finish(lastIn []byte, cs1, cs2 *noise.CipherState) error {
+func (h *Handshake) finish(lastIn []byte, cs1, cs2 *flynn.CipherState) error {
 	if lastIn != nil {
 		h.lastIn = append([]byte(nil), lastIn...)
 	}
@@ -178,3 +183,7 @@ func (h *Handshake) Session() *Session { return h.session }
 
 // PeerKey is the peer's static key, once the handshake has it.
 func (h *Handshake) PeerKey() []byte { return h.hs.PeerStatic() }
+
+var ErrPeerKey = errors.New("direct: the peer's static key is not the expected one")
+
+func sameKey(a, b []byte) bool { return len(a) == identity.KeySize && bytes.Equal(a, b) }

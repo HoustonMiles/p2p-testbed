@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
+	"p2ptestbed/p2p/internal/noise"
 	"time"
 )
 
@@ -42,7 +43,7 @@ func (h *Hopper) open(from netip.AddrPort, pkt, dst []byte) (byte, []byte, bool)
 	}
 	typ, payload, err := h.cfg.Session.Open(dst, pkt)
 	switch {
-	case errors.Is(err, ErrReplay):
+	case errors.Is(err, noise.ErrReplay):
 		h.stats.replayed.Add(1)
 	case err != nil:
 		h.stats.authFailed.Add(1)
@@ -85,4 +86,3 @@ func (h *Hopper) notePeerHeard(sk *hopSocket, body []byte) {
 	}
 	h.mu.Unlock()
 }
-

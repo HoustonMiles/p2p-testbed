@@ -3,12 +3,13 @@ package direct
 import (
 	"errors"
 	"net/netip"
+	"p2ptestbed/p2p/internal/noise"
 	"time"
 )
 
 // Config for a Hopper. Zero durations take the defaults noted.
 type Config struct {
-	Session  *Session
+	Session  *noise.Session
 	Schedule *Schedule // built from Session.HopKey(); the same on both peers
 	PeerIP   netip.Addr
 	LocalIP  netip.Addr // zero binds all interfaces

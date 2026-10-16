@@ -1,13 +1,61 @@
-package direct
+package noise
 
 import (
 	"bytes"
-	"encoding/hex"
 	"errors"
-	"os"
-	"path/filepath"
+	"p2ptestbed/p2p/internal/identity"
 	"testing"
 )
+
+// testKey is a fixed keypair, so tests are repeatable.
+func testKey(b byte) identity.Keypair {
+	kp, err := identity.FromPrivate(bytes.Repeat([]byte{b}, identity.KeySize))
+	if err != nil {
+		panic(err)
+	}
+	return kp
+}
+
+// sides builds both sides of a handshake. initiatorExpects and
+// responderExpects are the peer keys each side is given (nil: none).
+func sides(t testing.TB, pattern string, initiatorExpects, responderExpects []byte) (*Handshake, *Handshake) {
+	t.Helper()
+	a, err := NewHandshake(HandshakeConfig{Pattern: pattern, Initiator: true, Static: testKey(1),
+		PeerKey: initiatorExpects, Prologue: []byte("trial 1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewHandshake(HandshakeConfig{Pattern: pattern, Static: testKey(2),
+		PeerKey: responderExpects, Prologue: []byte("trial 1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, b
+}
+
+// exchange delivers each message to the other side until no reply comes.
+func exchange(a, b *Handshake) error {
+	msg, err := a.Start()
+	to, from := b, a
+	for i := 0; i < 4 && msg != nil && err == nil; i++ {
+		msg, err = to.Handle(msg)
+		to, from = from, to
+	}
+	if err == nil && !(a.Done() && b.Done()) {
+		err = errors.New("handshake did not finish")
+	}
+	return err
+}
+
+// handshake returns the two sessions of a KK handshake between keys 1 and 2.
+func handshake(t testing.TB) (a, b *Session) {
+	t.Helper()
+	ha, hb := sides(t, "kk", testKey(2).Public, testKey(1).Public)
+	if err := exchange(ha, hb); err != nil {
+		t.Fatal(err)
+	}
+	return ha.Session(), hb.Session()
+}
 
 func TestPatternsComplete(t *testing.T) {
 	cases := []struct {
@@ -138,39 +186,5 @@ func TestConfigValidation(t *testing.T) {
 	}
 	if _, err := NewHandshake(HandshakeConfig{Pattern: "ik", Static: testKey(1)}); err != nil {
 		t.Errorf("ik responder without a peer key: %v", err)
-	}
-}
-
-func TestKeyFiles(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "keys", "a")
-	kp, err := NewKeypair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteKeypair(base, kp); err != nil {
-		t.Fatal(err)
-	}
-	got, err := ReadKeypair(base + ".key")
-	if err != nil || !bytes.Equal(got.Private, kp.Private) || !bytes.Equal(got.Public, kp.Public) {
-		t.Fatalf("read back %v: %v", got, err)
-	}
-	pub, err := ReadPublicKey(base + ".pub")
-	if err != nil || !bytes.Equal(pub, kp.Public) {
-		t.Fatalf("public key: %v", err)
-	}
-	if info, _ := os.Stat(base + ".key"); info.Mode().Perm() != 0o600 {
-		t.Errorf("private key mode %v, want 0600", info.Mode().Perm())
-	}
-	os.WriteFile(filepath.Join(filepath.Dir(base), "b.pub"), []byte(hex.EncodeToString(testKey(2).Public)), 0o644)
-	trusted, err := ReadTrustedKeys(filepath.Dir(base), kp.Public)
-	if err != nil || len(trusted) != 1 || !bytes.Equal(trusted[0], testKey(2).Public) {
-		t.Fatalf("trusted keys from the directory, without our own: %x, %v", trusted, err)
-	}
-	if _, err := ReadTrustedKeys(base+".pub", kp.Public); err == nil {
-		t.Error("only our own key accepted as a trusted set")
-	}
-	os.WriteFile(base+".pub", []byte("abcd\n"), 0o644)
-	if _, err := ReadPublicKey(base + ".pub"); err == nil {
-		t.Error("short key accepted")
 	}
 }

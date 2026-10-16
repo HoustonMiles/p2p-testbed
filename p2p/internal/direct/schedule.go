@@ -78,6 +78,14 @@ const (
 	SideResponder byte = 'r'
 )
 
+// sides returns our side of the link and the peer's.
+func sides(initiator bool) (local, peer byte) {
+	if initiator {
+		return SideInitiator, SideResponder
+	}
+	return SideResponder, SideInitiator
+}
+
 // Port returns side's port in slot. The side is part of the input so the
 // two peers' port sequences are independent.
 func (s *Schedule) Port(side byte, slot uint64) uint16 {

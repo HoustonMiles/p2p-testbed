@@ -4,42 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"net"
-	"net/netip"
-	"time"
-
-	"p2ptestbed/p2p/internal/direct"
+	"p2ptestbed/p2p/internal/noise"
 	"p2ptestbed/p2p/internal/wire"
+	"time"
 )
-
-// startDirect brings up the direct channel: Noise handshake, port check,
-// hopper, then a first hop proven both ways. It returns false without an
-// error when hopping cannot be used, which is a result.
-//
-// TODO(paper §5 Dynamic Handoff Mode): each false return here is where the
-// Handoff Manager should pivot to the relay instead of ending the run.
-func (r *runner) startDirect() (bool, error) {
-	if err := r.handshake(); err != nil {
-		return false, err
-	}
-	possible, err := r.checkPorts()
-	if err != nil {
-		return false, err
-	}
-	if !possible && !r.cfg.Direct.HopForce {
-		r.logf("hop: not possible (a NAT changes ports); the relay would take over")
-		return false, nil
-	}
-	if err := r.startHopper(); err != nil {
-		return false, err
-	}
-	if err := r.barrierBothWays(stepHopping, r.cfg.StepTimeout); err != nil {
-		r.logf("hop: no contact through the hopper: %v", err)
-		return false, nil
-	}
-	r.res.HopConnected = true
-	return true, nil
-}
 
 // handshake runs Noise over the punched socket: the peer with the lower
 // static key initiates; both sides resend their last message until done,
@@ -74,7 +42,7 @@ func (r *runner) handshake() error {
 	return nil
 }
 
-func (r *runner) newHandshake() (*direct.Handshake, error) {
+func (r *runner) newHandshake() (*noise.Handshake, error) {
 	peerKey, err := r.expectedPeerKey()
 	if err != nil {
 		return nil, err
@@ -83,7 +51,7 @@ func (r *runner) newHandshake() (*direct.Handshake, error) {
 	if err != nil {
 		return nil, err
 	}
-	return direct.NewHandshake(direct.HandshakeConfig{
+	return noise.NewHandshake(noise.HandshakeConfig{
 		Pattern:   r.cfg.Direct.Noise,
 		Initiator: initiator,
 		Static:    r.cfg.Direct.Key,
@@ -151,66 +119,18 @@ func (r *runner) resendHandshake() {
 	}
 }
 
-// checkPorts exchanges, at a barrier, whether each side's NAT keeps the
-// local port as the public port, which hopping needs on both sides.
-func (r *runner) checkPorts() (bool, error) {
-	keeps := r.keepsPort()
-	var changes uint64 // barrier value: 1 = our NAT changes ports
-	if !keeps {
-		changes = 1
+// onHandshake answers the peer's handshake messages. Before our own
+// handshake starts there is nothing to answer with; the initiator retries.
+func (r *runner) onHandshake(m inbound) {
+	if r.hs == nil || m.hop {
+		return
 	}
-	if err := r.barrier(stepSecured, changes, r.cfg.StepTimeout); err != nil {
-		return false, err
-	}
-	peerKeeps := r.peerValue[stepSecured] == 0
-	r.res.KeepsPort, r.res.PeerKeepsPort = ptr(keeps), ptr(peerKeeps)
-	r.res.HopPossible = ptr(keeps && peerKeeps)
-	return keeps && peerKeeps, nil
-}
-
-// keepsPort: STUN saw our local port, and the rendezvous saw the same
-// mapping. Without STUN we cannot tell, and assume it does.
-func (r *runner) keepsPort() bool {
-	if !r.stunGot.IsValid() {
-		return true
-	}
-	local := r.conn.LocalAddr().(*net.UDPAddr).AddrPort().Port()
-	return r.stunGot.Port() == local && (r.res.MappingVaries == nil || !*r.res.MappingVaries)
-}
-
-func (r *runner) startHopper() error {
-	d := r.cfg.Direct
-	sched := direct.NewSchedule(r.hs.Session().HopKey(), d.HopInterval)
-	if d.ClockOffset != 0 || d.ClockDriftPPM != 0 {
-		sched.Clock = direct.SkewedClock(d.ClockOffset, d.ClockDriftPPM)
-	}
-	var err error
-	r.hopper, err = direct.NewHopper(direct.Config{
-		Session: r.hs.Session(), Schedule: sched,
-		PeerIP: r.remote.Addr(), LocalIP: r.localIP(),
-		Lead: d.HopLead, MinOverlap: d.HopMinOverlap, MaxOverlap: d.HopMaxOverlap, DrainIdle: d.HopDrainIdle,
-		OnPacket: r.onHop,
-		Logf:     r.logf,
-	})
+	reply, err := r.hs.Handle(m.pkt.Body)
 	if err != nil {
-		return err
+		r.logf("handshake: dropped a bad message from %v: %v", m.from, err)
+		return
 	}
-	r.res.Hopping = true
-	r.logf("hop: started, %v", r.hopper)
-	return nil
-}
-
-// localIP is the punched socket's address, unless it is bound to all.
-func (r *runner) localIP() netip.Addr {
-	ip := r.conn.LocalAddr().(*net.UDPAddr).AddrPort().Addr().Unmap()
-	if ip.IsUnspecified() {
-		return netip.Addr{}
-	}
-	return ip
-}
-
-func (r *runner) closeHopper() {
-	if r.hopper != nil {
-		r.hopper.Close()
+	if reply != nil {
+		r.sendTo(m.from, wire.Handshake, 0, reply)
 	}
 }

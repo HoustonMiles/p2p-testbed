@@ -1,10 +1,10 @@
-package direct
+// Package identity is a peer's long-lived static keys and the files they
+// live in: its own keypair, and the public keys of the peers it trusts.
+package identity
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,10 +25,11 @@ func NewKeypair() (Keypair, error) {
 	if _, err := rand.Read(priv); err != nil {
 		return Keypair{}, err
 	}
-	return keypairFrom(priv)
+	return FromPrivate(priv)
 }
 
-func keypairFrom(priv []byte) (Keypair, error) {
+// FromPrivate rebuilds a keypair from its private half.
+func FromPrivate(priv []byte) (Keypair, error) {
 	pub, err := curve25519.X25519(priv, curve25519.Basepoint)
 	return Keypair{Private: priv, Public: pub}, err
 }
@@ -51,35 +52,11 @@ func ReadKeypair(path string) (Keypair, error) {
 	if err != nil {
 		return Keypair{}, err
 	}
-	return keypairFrom(priv)
+	return FromPrivate(priv)
 }
 
 // ReadPublicKey reads a .pub file.
 func ReadPublicKey(path string) ([]byte, error) { return readHexKey(path) }
-
-// ReadTrustedKeys reads one .pub file, or every .pub file in a directory:
-// the members of a network. The key except (our own, in a shared
-// directory) is left out.
-func ReadTrustedKeys(path string, except []byte) ([][]byte, error) {
-	paths := []string{path}
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		paths, _ = filepath.Glob(filepath.Join(path, "*.pub"))
-	}
-	var keys [][]byte
-	for _, p := range paths {
-		key, err := ReadPublicKey(p)
-		if err != nil {
-			return nil, err
-		}
-		if !bytes.Equal(key, except) {
-			keys = append(keys, key)
-		}
-	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("%s: no public keys of other peers", path)
-	}
-	return keys, nil
-}
 
 func readHexKey(path string) ([]byte, error) {
 	b, err := os.ReadFile(path)
@@ -92,7 +69,3 @@ func readHexKey(path string) ([]byte, error) {
 	}
 	return key, nil
 }
-
-var ErrPeerKey = errors.New("direct: the peer's static key is not the expected one")
-
-func sameKey(a, b []byte) bool { return len(a) == KeySize && bytes.Equal(a, b) }

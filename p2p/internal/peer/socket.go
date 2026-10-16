@@ -1,14 +1,30 @@
 package peer
 
 import (
-	"fmt"
+	"net"
 	"net/netip"
-	"time"
-
 	"p2ptestbed/p2p/internal/direct"
 	"p2ptestbed/p2p/internal/stun"
 	"p2ptestbed/p2p/internal/wire"
+	"time"
 )
+
+func (r *runner) listen() error {
+	laddr, err := net.ResolveUDPAddr("udp4", r.cfg.Local)
+	if err != nil {
+		return err
+	}
+	if r.conn, err = net.ListenUDP("udp4", laddr); err != nil {
+		return err
+	}
+	r.conn.SetReadBuffer(4 << 20)
+	r.conn.SetWriteBuffer(4 << 20)
+	r.res.Local = r.conn.LocalAddr().String()
+	return nil
+}
+
+// linger keeps answering the peer, which may still be finishing a step.
+func (r *runner) linger() { r.pump(r.cfg.Linger, 0, nil, never) }
 
 // readLoop reads the punched socket on its own goroutine.
 func (r *runner) readLoop() {
@@ -121,82 +137,6 @@ func (r *runner) handle(m inbound) {
 	}
 }
 
-func (r *runner) onSTUN(m inbound) {
-	if a, ok := stun.Parse(m.stun, r.stunTx); ok && !r.stunGot.IsValid() {
-		r.stunGot = a
-		r.res.STUNMs = ptr(ms(m.at))
-	}
-}
-
-// onPeerInfo links with the first member introduced; later ones are
-// ignored until the link manager (mesh step 3).
-func (r *runner) onPeerInfo(m inbound) {
-	in, ok := wire.ParseIntro(m.pkt.Body)
-	if !ok || m.from != r.rdv || r.peerInfo || in.PeerID == r.id {
-		return
-	}
-	r.peerInfo, r.peerRdv, r.remote = true, in.Peer, in.Peer
-	r.peerID.Store(in.PeerID)
-	r.rdvKey = append([]byte(nil), in.PeerKey...)
-	r.res.PeerID = ptr(idString(in.PeerID))
-	r.res.RdvAddr, r.res.PeerRdvAddr = ptr(in.Self.String()), ptr(in.Peer.String())
-	r.res.RendezvousMs = ptr(ms(m.at))
-	if r.stunGot.IsValid() {
-		r.res.MappingVaries = ptr(r.stunGot != in.Self)
-	}
-	r.logf("rendezvous: we are %v, peer %016x is %v", in.Self, in.PeerID, in.Peer)
-}
-
-func (r *runner) onPunch(m inbound) {
-	r.res.PunchesRecv++
-	r.learn(m.from)
-	r.sendTo(m.from, wire.PunchAck, m.pkt.Seq, nil)
-}
-
-func (r *runner) onPunchAck(m inbound) {
-	r.learn(m.from)
-	if !r.gotAck {
-		r.gotAck, r.ackAt = true, m.at
-	}
-}
-
-func (r *runner) onPing(m inbound) { r.reply(m, wire.Pong, m.pkt.Seq, m.pkt.Body) }
-
-func (r *runner) onPong(m inbound) {
-	sentAt := time.Duration(wire.ParseU64(m.pkt.Body))
-	if _, dup := r.rtts[m.pkt.Seq]; !dup && m.pkt.Seq < uint64(r.cfg.Pings) {
-		r.rtts[m.pkt.Seq] = ms(m.at - sentAt)
-	}
-}
-
-func (r *runner) onBarrier(m inbound) {
-	r.peerValue[m.pkt.Seq] = wire.ParseU64(m.pkt.Body)
-	if r.reached >= m.pkt.Seq {
-		r.reply(m, wire.BarrierAck, m.pkt.Seq, wire.U64(r.myValue[m.pkt.Seq]))
-	}
-}
-
-func (r *runner) onBarrierAck(m inbound) {
-	r.peerValue[m.pkt.Seq] = wire.ParseU64(m.pkt.Body)
-	r.acked[m.pkt.Seq] = true
-}
-
-// onHandshake answers the peer's handshake messages. Before our own
-// handshake starts there is nothing to answer with; the initiator retries.
-func (r *runner) onHandshake(m inbound) {
-	if r.hs == nil || m.hop {
-		return
-	}
-	reply, err := r.hs.Handle(m.pkt.Body)
-	if err != nil {
-		r.logf("handshake: dropped a bad message from %v: %v", m.from, err)
-		return
-	}
-	if reply != nil {
-		r.sendTo(m.from, wire.Handshake, 0, reply)
-	}
-}
-
 // reply answers m the way it came, so a peer still one step behind (before
 // its Hopper is up) keeps getting answers on the punched socket.
 func (r *runner) reply(m inbound, t wire.Type, seq uint64, body []byte) {
@@ -229,35 +169,11 @@ func (r *runner) sendTo(to netip.AddrPort, t wire.Type, seq uint64, body []byte)
 	r.conn.WriteToUDPAddrPort(p.Append(nil), to)
 }
 
-// barrier waits until the peer has reached step too. Both sides announce it;
-// whoever is first answers the latecomer with a BarrierAck. The peer's own
-// Barrier is enough to pass, which proves only the peer -> us direction.
-func (r *runner) barrier(step, value uint64, timeout time.Duration) error {
-	reached := func() bool { _, ok := r.peerValue[step]; return ok }
-	return r.waitAt(barrierWait{step, value, timeout, reached})
-}
-
-// barrierBothWays passes only on the peer's BarrierAck to our own Barrier,
-// proof that both directions work. With one direction broken (a symmetric
-// NAT on one side, when hopping is forced) both peers then fail this step
-// together, instead of one carrying on alone and failing later.
-func (r *runner) barrierBothWays(step uint64, timeout time.Duration) error {
-	return r.waitAt(barrierWait{step, 0, timeout, func() bool { return r.acked[step] }})
-}
-
-type barrierWait struct {
-	step, value uint64
-	timeout     time.Duration
-	passed      func() bool
-}
-
-func (r *runner) waitAt(w barrierWait) error {
-	r.reached, r.myValue[w.step] = w.step, w.value
-	ok := r.pump(w.timeout, 50*time.Millisecond,
-		func() { r.sendPeer(wire.Barrier, w.step, wire.U64(w.value)) },
-		w.passed)
-	if !ok {
-		return fmt.Errorf("peer did not reach step %d within %v", w.step, w.timeout)
+func resolve(hostport string) (netip.AddrPort, error) {
+	a, err := net.ResolveUDPAddr("udp4", hostport)
+	if err != nil {
+		return netip.AddrPort{}, err
 	}
-	return nil
+	ap := a.AddrPort()
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()), nil
 }
