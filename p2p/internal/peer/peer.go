@@ -24,7 +24,7 @@
 // by the pair's IDs), so no two members ever wait on each other in a cycle.
 //
 // TODO(paper §5 Relayed Mode): add a relay mode that runs steps 4 and 5
-// through the coturn relay (203.0.113.102) with the same Noise transport.
+// through the coturn relay (198.18.0.102) with the same Noise transport.
 package peer
 
 import (
@@ -57,7 +57,7 @@ type Config struct {
 	RefreshInterval   time.Duration // re-register this often while running; 0 means 1 s (under the rendezvous TTL)
 	PunchTimeout      time.Duration
 	PunchInterval     time.Duration
-	StepTimeout       time.Duration // how long to wait for a member at a barrier
+	StepTimeout       time.Duration // how long to wait for a member at a barrier; in rooms of 3+, plus the punch and handshake timeouts
 
 	Pings        int // 0 skips step 4
 	PingInterval time.Duration
@@ -73,6 +73,8 @@ type Config struct {
 	Direct *DirectConfig // nil: raw UDP
 
 	Logf func(format string, args ...any)
+
+	unreachable netip.Addr // tests: drop all we send there, like a NAT that never lets that member in
 }
 
 // DirectConfig sets up the Port-Hopping Direct Channel. Zero durations take
@@ -210,7 +212,7 @@ func (r *runner) connect() error {
 	}
 	go r.keepRegistered()
 	r.punchAll()
-	r.barrierAll(barrierWait{step: stepConnected, timeout: r.cfg.StepTimeout})
+	r.barrierAll(barrierWait{step: stepConnected, timeout: r.stepTimeout()})
 	return nil
 }
 

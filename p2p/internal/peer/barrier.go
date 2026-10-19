@@ -57,6 +57,25 @@ func (w barrierWait) errFor(l *link) error {
 	return fmt.Errorf("the member did not reach step %d within %v", w.step, w.timeout)
 }
 
+// stepTimeout is how long a barrier waits for a member: StepTimeout, plus
+// how far the member may trail us through no fault of our link.
+func (r *runner) stepTimeout() time.Duration { return r.cfg.StepTimeout + r.lag() }
+
+// lag: a link that never punches, or whose handshake never ends, holds its
+// peer in that phase for the whole timeout, however soon its other links
+// were done; and every member that waits for that peer falls behind too.
+// In a room of two the member has no other link to be held by.
+func (r *runner) lag() time.Duration {
+	if len(r.links) < 2 {
+		return 0
+	}
+	lag := r.cfg.PunchTimeout
+	if r.cfg.Direct != nil {
+		lag += r.handshakeTimeout()
+	}
+	return lag
+}
+
 // barrier waits until every link in ls has passed w, and returns those that
 // did not within the timeout. Both sides announce the step; whoever is
 // first answers the latecomer with a BarrierAck. A member that left is not

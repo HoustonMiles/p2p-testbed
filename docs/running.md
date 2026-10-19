@@ -24,10 +24,27 @@ terminal doesn't stop it.
 Experiment files (`experiments/*.toml`) set the trial type, its `[params]`,
 the runs per configuration and a `[matrix]`. Every combination of matrix
 values is one configuration; tables in the matrix (`[[matrix.pairing]]`)
-bundle several settings under one name. Matrix keys: `nat_a`, `nat_b`,
-`upstream_a`, `upstream_b`, `cgn_a`, `cgn_b`, `net_profile`, `uplink_mbit`,
-`downlink_mbit`, `udp_timeout`, `udp_timeout_stream` (see
-[testbed.md](testbed.md#choosing-a-configuration) for their values).
+bundle several settings under one name. Matrix keys (see
+[testbed.md](testbed.md#choosing-a-configuration) for their values):
+
+- testbed-wide: `net_profile`, `uplink_mbit`, `downlink_mbit`,
+  `udp_timeout`, `udp_timeout_stream`
+- per peer, with the peer's name after the underscore: `nat_a`,
+  `upstream_a`, `cgn_a`, and `net_profile_a`, `uplink_mbit_a`,
+  `downlink_mbit_a` (these default to the testbed-wide value)
+- `peers`: how many peers (2 to 255, default 2), and `nats`: a list of NAT
+  types the home routers take round-robin (a, b, c, ... in turn), which a
+  per-peer `nat_x` overrides:
+
+  ```toml
+  [matrix]
+  peers = [2, 4, 8]
+  nats = [["port_restricted", "full_cone", "symmetric"]]
+  ```
+
+A peer gets a CGN only when the configuration puts it behind one, so large
+testbeds stay small. Configurations of two peers keep the IDs they had
+before `peers` existed, so older results still match.
 
 | Experiment | What it measures |
 |---|---|
@@ -45,9 +62,9 @@ a WAN host), and `command`, which runs `cmd_a`/`cmd_b` on the peers. Each comman
 prints one JSON object on its last line, and its keys become result columns
 (prefixed `a_`/`b_`). This is how the experiments run `punch`; the trial
 seed is passed as its `-room`, so both peers of a trial find each other.
-`punch` prints one line per link, so with the testbed's two peers the last
-line is the only one; rooms of more peers need the N-peer testbed (mesh
-step 4).
+`punch` prints one line per link, so with two peers the last line is the
+only one. The `command` trial runs on peers a and b only; a trial type for
+whole meshes is the next step (mesh step 4b).
 
 **How trials are run:**
 - Each configuration's trials are split into blocks (`block_size`), and the
@@ -127,7 +144,10 @@ docker compose exec peer-b punch -name b -room 42 -direct -hop-interval 1s
 
 Use a new `-room` number for each try. `-name` labels the logs and results
 and names the default key file. With more members, give each the room size,
-e.g. `-peers 3`; each prints one row per link. `punch -h` lists every flag; the direct
+e.g. `-peers 3`; each prints one row per link. For more than two peers,
+start a larger testbed first (`p2prunner up --peers N`, see
+[testbed.md](testbed.md#peers)) and give each peer its key
+(`punch -genkey /keys/<name>`). `punch -h` lists every flag; the direct
 channel's are in [design.md](design.md#flags).
 
 ## Analysis notebook

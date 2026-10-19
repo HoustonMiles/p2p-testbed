@@ -12,3 +12,4 @@ p2prunner
 *.md
 .env
 tests
+.testbed

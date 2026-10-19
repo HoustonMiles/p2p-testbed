@@ -21,10 +21,7 @@ func (r *runner) handshakeAll() {
 			l.fail(fmt.Errorf("noise handshake: %w", err))
 		}
 	}
-	ls, timeout := r.active(), r.cfg.Direct.HandshakeTimeout
-	if timeout == 0 {
-		timeout = r.cfg.PunchTimeout
-	}
+	ls, timeout := r.active(), r.handshakeTimeout()
 	r.pump(timeout, r.cfg.PunchInterval,
 		func() {
 			for _, l := range ls {
@@ -35,6 +32,13 @@ func (r *runner) handshakeAll() {
 	for _, l := range ls {
 		l.finishHandshake(timeout)
 	}
+}
+
+func (r *runner) handshakeTimeout() time.Duration {
+	if t := r.cfg.Direct.HandshakeTimeout; t != 0 {
+		return t
+	}
+	return r.cfg.PunchTimeout
 }
 
 func (l *link) startHandshake() error {

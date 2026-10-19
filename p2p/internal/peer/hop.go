@@ -22,7 +22,7 @@ func (r *runner) startDirect() {
 			l.fail(err)
 		}
 	}
-	w := barrierWait{step: stepHopping, timeout: r.cfg.StepTimeout, bothWays: true}
+	w := barrierWait{step: stepHopping, timeout: r.stepTimeout(), bothWays: true}
 	missed := r.barrier(r.active(), w)
 	for _, l := range missed {
 		l.stop("hop: no contact through the hopper: " + w.errFor(l).Error())
@@ -42,7 +42,7 @@ func (r *runner) checkPorts() {
 	if !keeps {
 		changes = 1
 	}
-	r.barrierAll(barrierWait{step: stepSecured, value: changes, timeout: r.cfg.StepTimeout})
+	r.barrierAll(barrierWait{step: stepSecured, value: changes, timeout: r.stepTimeout()})
 	for _, l := range r.active() {
 		peerKeeps := l.peerValue[stepSecured] == 0
 		l.res.PeerKeepsPort, l.res.HopPossible = ptr(peerKeeps), ptr(keeps && peerKeeps)

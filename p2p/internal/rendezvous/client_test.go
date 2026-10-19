@@ -48,4 +48,3 @@ func TestClientDeparture(t *testing.T) {
 		t.Error("accepted a PeerLeft without an ID")
 	}
 }
-

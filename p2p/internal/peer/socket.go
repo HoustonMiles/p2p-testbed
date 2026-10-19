@@ -151,6 +151,9 @@ func (r *runner) handle(m inbound) {
 }
 
 func (r *runner) sendTo(to netip.AddrPort, t wire.Type, seq uint64, body []byte) {
+	if to.Addr() == r.cfg.unreachable {
+		return
+	}
 	p := wire.Packet{Type: t, Room: r.cfg.Room, From: r.id, Seq: seq, Body: body}
 	r.conn.WriteToUDPAddrPort(p.Append(nil), to)
 }

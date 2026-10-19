@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# load-kernel-modules.sh - run once per boot on your Linux machine (needs sudo).
+# prepare-host.sh - run once per boot on your Linux machine (needs sudo).
 #
 # Containers share the host's kernel but are not allowed to load kernel
-# modules themselves, so we load the ones the routers need here.
+# modules or change its global limits themselves, so we do that here.
 # =============================================================================
 set -euo pipefail
 
@@ -27,3 +27,12 @@ for m in "${modules[@]}"; do
     echo "MISSING  $m  (your kernel may not include it)"
   fi
 done
+
+# The kernel's ARP table is shared by all containers. On the WAN every
+# router may talk to every other, so a testbed of N peers needs about
+# (N + CGNs)^2 entries; the default limit of 1024 runs out above ~30 peers,
+# and then punches fail silently. These cover 255 peers, each with a CGN.
+sudo sysctl -q -w net.ipv4.neigh.default.gc_thresh1=65536 \
+                  net.ipv4.neigh.default.gc_thresh2=262144 \
+                  net.ipv4.neigh.default.gc_thresh3=524288
+echo "set      ARP table limit $(sysctl -n net.ipv4.neigh.default.gc_thresh3)"

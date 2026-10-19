@@ -18,7 +18,7 @@ class SmokeTest(unittest.TestCase):
     def test_healthy_testbed_passes(self):
         code, out = run_quietly(checks.smoke, FakeTestbed())
         self.assertEqual(code, 0, out)
-        self.assertIn("203.0.113.21", out)  # B is behind its CGN
+        self.assertIn("198.18.2.11", out)  # b is behind its CGN
 
     def test_wrong_public_ip_fails(self):
         code, out = run_quietly(checks.smoke, FakeTestbed(public={"a": "1.2.3.4"}))
@@ -49,14 +49,23 @@ class VerifyTest(unittest.TestCase):
         code, out = run_quietly(checks.verify, tb, False)
         self.assertEqual(code, 0, out)
 
-    def test_all_types_in_order_then_restore(self):
+    def test_all_types_at_once_then_restore(self):
         tb = FakeTestbed()
         run_quietly(checks.verify, tb, True)
-        set_types = [u["NAT_A_TYPE"] for u in tb.ups if isinstance(u, dict)]
-        self.assertEqual(set_types, list(checks.TYPES))
-        for env in tb.ups[:-1]:
-            self.assertEqual((env["NAT_B_UPSTREAM"], env["CGN_B_TYPE"]), ("cgnat", env["NAT_A_TYPE"]))
-        self.assertEqual(tb.ups[-1][0], "compose")  # plain `up` keeps the user's .env
+        cfg = tb.ups[0]
+        homes, behind = cfg.peers[:4], cfg.peers[4:]
+        self.assertEqual([cfg.factors[f"nat_{p.name}"] for p in homes], list(checks.TYPES))
+        self.assertEqual([cfg.factors[f"cgn_{p.name}"] for p in behind], list(checks.TYPES))
+        self.assertEqual(cfg.cgn_peers, {p.name for p in behind})
+        self.assertEqual({cfg.factors[f"nat_{p.name}"] for p in behind}, {"full_cone"})
+        self.assertEqual([u[0] for u in tb.ups[1:]], ["down", "compose"])  # plain `up` keeps the user's .env
+
+    def test_every_running_peer_is_checked(self):
+        tb = FakeTestbed(nat=("port_restricted",) * 5, behaviour={"e": ("APD", "APD")})
+        code, out = run_quietly(checks.verify, tb, False)
+        self.assertEqual(code, 1)
+        self.assertEqual(out.count("PASS"), 4)
+        self.assertIn("peer e", out)
 
 
 class PreflightTest(unittest.TestCase):

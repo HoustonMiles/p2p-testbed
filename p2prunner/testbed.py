@@ -2,7 +2,9 @@
 Control of the Docker testbed through `docker compose`.
 
 Everything here is the same command you would type by hand, run as a
-subprocess from the repository root.
+subprocess from the repository root. A configuration's stack is written to
+.testbed/compose.yml (see compose.py) and started from there; without that
+file, the committed two-peer docker-compose.yml is used.
 """
 
 from __future__ import annotations
@@ -12,10 +14,12 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from p2prunner.experiment import FACTORS
+from p2prunner import compose as compose_file
+from p2prunner import topology
 
-ROUTERS = ("nat-a", "nat-b", "cgn-a", "cgn-b")
-PEERS = ("peer-a", "peer-b")
+GENERATED = Path(".testbed/compose.yml")
+MAX_PARALLEL = 32  # docker exec at once; more mostly queues up in the daemon
+ARP_LIMIT = Path("/proc/sys/net/ipv4/neigh/default/gc_thresh3")
 
 
 class TestbedError(RuntimeError):
@@ -25,6 +29,12 @@ class TestbedError(RuntimeError):
 class Testbed:
     def __init__(self, root: Path):
         self.root = root
+
+    @property
+    def compose_path(self) -> Path:
+        """The stack the runner started last, else the committed one."""
+        generated = self.root / GENERATED
+        return generated if generated.exists() else self.root / "docker-compose.yml"
 
     # ------------------------------------------------------------------
     # Low-level helpers
@@ -36,7 +46,8 @@ class Testbed:
         if env:
             full_env.update(env)
         try:
-            return subprocess.run(["docker", "compose", *args], cwd=self.root, env=full_env,
+            cmd = ["docker", "compose", "-f", str(self.compose_path), "--project-directory", str(self.root), *args]
+            return subprocess.run(cmd, cwd=self.root, env=full_env,
                                   capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired as e:
             raise TestbedError(f"docker compose {' '.join(args)} timed out after {timeout}s") from e
@@ -51,29 +62,53 @@ class Testbed:
 
     def parallel(self, jobs: dict[str, callable]) -> dict:
         """Run several functions at once; returns {name: result}."""
-        with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        with ThreadPoolExecutor(max_workers=min(len(jobs), MAX_PARALLEL)) as pool:
             futures = {name: pool.submit(fn) for name, fn in jobs.items()}
             return {name: f.result() for name, f in futures.items()}
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
-    def up(self, env: dict[str, str]) -> None:
-        """(Re)create every container with the given settings and wait until
-        all of them report healthy.
+    def up(self, cfg) -> None:
+        """(Re)create the configuration's containers (its peers, with CGNs
+        for those behind one) and wait until all of them report healthy.
+        A running stack of another shape is stopped first.
 
-        Every testbed variable is set explicitly, so leftovers in your shell
-        or in a .env file can never change a configuration by accident.
+        cfg.env sets every testbed variable explicitly, so leftovers in your
+        shell or in a .env file can never change a configuration by accident.
         """
-        full = {var: default for var, default in FACTORS.values()}
-        full.update(env)
+        self.use_stack(len(cfg.peers), cfg.cgn_peers)
         result = self.compose("up", "-d", "--wait", "--force-recreate", "--remove-orphans",
-                              env=full, timeout=300)
+                              env=cfg.env, timeout=120 + 5 * len(cfg.peers))
         if result.returncode != 0:
+            # Half-started containers would break the retry the same way.
+            self.compose("down", "-t", "1", "--remove-orphans", timeout=300)
             raise TestbedError("testbed failed to start:\n" + result.stderr[-2000:])
 
+    def use_stack(self, n: int, cgn: set[str]) -> None:
+        """Make the stack of peers 1..n the one compose uses. Docker cannot
+        always move a running container onto a network new to it (a CGN's
+        carrier network), so a running stack of another shape stops first."""
+        check_arp_limit(topology.wan_neighbours(n, len(cgn)))
+        text = compose_file.render(n, cgn)
+        if self.compose_path.read_text() != text:
+            self.compose("down", "-t", "1", "--remove-orphans", timeout=300)
+        path = self.root / GENERATED
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(text)
+
     def down(self) -> None:
-        self.compose("down", "-t", "1", timeout=120)
+        """Stop everything and go back to the committed two-peer stack."""
+        self.compose("down", "-t", "1", "--remove-orphans", timeout=300)
+        (self.root / GENERATED).unlink(missing_ok=True)
+
+    def services(self) -> list[str]:
+        return self.compose("ps", "--status", "running", "--services").stdout.split()
+
+    def running_peers(self) -> list[str]:
+        """Names of the running peers, in peer order (a, b, ..., z, aa, ...)."""
+        names = [s.removeprefix("peer-") for s in self.services() if s.startswith("peer-")]
+        return sorted(names, key=topology.peer_number)
 
     def reset_state(self) -> None:
         """Forget everything the NATs learned in the previous trial.
@@ -84,7 +119,8 @@ class Testbed:
           - ipset flush  : empty the cone-NAT tables (full/restricted cone)
         """
         script = "conntrack -F >/dev/null 2>&1; ipset flush >/dev/null 2>&1; true"
-        self.parallel({r: (lambda r=r: self.sh(r, script, timeout=30)) for r in ROUTERS})
+        routers = [s for s in self.services() if s.startswith(("nat-", "cgn-"))]
+        self.parallel({r: (lambda r=r: self.sh(r, script, timeout=30)) for r in routers})
 
     # ------------------------------------------------------------------
     # Information for the results' metadata
@@ -104,3 +140,15 @@ class Testbed:
             # Non-empty means there were uncommitted changes when the run started.
             "git_dirty": bool(out(["git", "status", "--porcelain"])),
         }
+
+
+def check_arp_limit(needed: int, limit_file: Path = ARP_LIMIT) -> None:
+    """Over the kernel's ARP table limit, routers silently lose track of
+    each other and punches fail as if a NAT blocked them."""
+    try:
+        limit = int(limit_file.read_text())
+    except (OSError, ValueError):
+        return  # not a Linux host we can see (e.g. Docker Desktop's VM)
+    if limit < needed:
+        raise TestbedError(f"this testbed needs up to {needed} ARP entries but the kernel allows {limit};"
+                           " run testbed/prepare-host.sh")

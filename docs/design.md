@@ -59,6 +59,17 @@ it fail at once ("left the room") instead of timing out. Members that come
 after the meeting are ignored; with fewer than N-1 after
 `-rendezvous-timeout`, the run goes on with those it met (`members`).
 
+**How long a barrier waits.** In a room of three or more, a barrier waits
+`-step-timeout` plus the punch and handshake timeouts. A link that never
+punches (or whose handshake never ends) holds its peer in that step for the
+whole timeout, however soon its other links were done, and every member
+waiting on that peer falls behind with it. With only `-step-timeout`, the
+members whose links were all quick gave up on the held-back ones at about
+the moment those arrived, and good links failed at random (seen with 8
+peers and a symmetric NAT). A member that really left is still noticed at
+once, through PeerLeft. In a room of two there is no other link to be held
+by, so the wait stays `-step-timeout`.
+
 Every packet carries the room and the sender's peer ID (the start of its
 static key in direct mode, random otherwise); a peer accepts packets only
 from members it was introduced to, and routes each to its link.

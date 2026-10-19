@@ -7,7 +7,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from p2prunner.checks import SIDES
+from p2prunner import topology
 
 NATDISCOVERY = {"EI": "Endpoint Independent", "AD": "Address Dependent",
                 "APD": "Address and Port Dependent"}
@@ -22,40 +22,54 @@ class Done:
 
 class FakeTestbed:
     """Answers the commands the checks send. By default the testbed is
-    healthy: A on the WAN, B behind a CGN, all port-restricted."""
+    healthy: a on the WAN, b behind a CGN, all port-restricted. One entry
+    per peer in nat and upstream makes a testbed of that many peers."""
 
     def __init__(self, **kw):
         self.nat = kw.get("nat", ("port_restricted", "port_restricted"))
-        self.upstream = kw.get("upstream", ("wan", "cgnat"))
+        self.upstream = kw.get("upstream", ("wan", "cgnat") + ("wan",) * (len(self.nat) - 2))
         self.cgn = kw.get("cgn", "port_restricted")
-        self.public = kw.get("public", {})              # side -> IP STUN reports
+        self.public = kw.get("public", {})              # peer -> IP STUN reports
         self.bypass = kw.get("bypass", False)           # WAN host reaches the peer
-        self.behaviour = kw.get("behaviour", {})        # side -> (mapping, filtering)
+        self.behaviour = kw.get("behaviour", {})        # peer -> (mapping, filtering)
         self.running = kw.get("running", True)
         self.ups: list = []                             # every reconfiguration, in order
 
+    @property
+    def names(self) -> list[str]:
+        return [p.name for p in topology.peers(len(self.nat))]
+
     def compose(self, *args, env=None, timeout=0):
-        if args[:1] == ("ps",):
-            return Done("nat-a\nnat-b\npeer-a\npeer-b\nstun\n" if self.running else "stun\n")
         self.ups.append(("compose", args))
         return Done()
 
-    def up(self, env):
-        self.ups.append(env)
+    def services(self) -> list[str]:
+        if not self.running:
+            return ["stun"]
+        return ["stun"] + [f"{kind}-{n}" for n in self.names for kind in ("nat", "peer")]
+
+    def running_peers(self) -> list[str]:
+        return [s.removeprefix("peer-") for s in self.services() if s.startswith("peer-")]
+
+    def up(self, cfg):
+        self.ups.append(cfg)
+
+    def down(self):
+        self.ups.append(("down",))
 
     def sh(self, service, script, timeout=0):
         if service.startswith("nat-"):
-            i = "ab".index(service[-1])
+            i = topology.peer_number(service.removeprefix("nat-")) - 1
             return Done(f"{self.nat[i]} {self.upstream[i]}\n")
         if service.startswith("cgn-"):
             return Done(self.cgn + "\n")
         if "turnutils_stunclient" in script:
-            return Done(f"0: : IPv4. UDP reflexive addr: {self.public_ip(service[-1])}:40000\n")
+            return Done(f"0: : IPv4. UDP reflexive addr: {self.public_ip(service.removeprefix('peer-'))}:40000\n")
         raise AssertionError(f"unexpected sh on {service}: {script}")
 
     def exec(self, service, command, timeout=0):
         if "turnutils_natdiscovery" in command:
-            m, f = self.behaviour.get(service[-1], ("EI", "APD"))
+            m, f = self.behaviour.get(service.removeprefix("peer-"), ("EI", "APD"))
             return Done(f"NAT with {NATDISCOVERY[m]} Mapping!\nNAT with {NATDISCOVERY[f]} Filtering!\n")
         if command[0] == "ip":
             return Done()
@@ -66,11 +80,11 @@ class FakeTestbed:
     def parallel(self, jobs):
         return {name: fn() for name, fn in jobs.items()}
 
-    def public_ip(self, side: str) -> str:
-        if side in self.public:
-            return self.public[side]
-        key = "cgn_wan" if self.upstream["ab".index(side)] == "cgnat" else "wan"
-        return SIDES[side][key]
+    def public_ip(self, name: str) -> str:
+        if name in self.public:
+            return self.public[name]
+        p = topology.peer(name)
+        return p.public_ip(self.upstream[p.number - 1] == "cgnat")
 
 
 class ResultFolders:

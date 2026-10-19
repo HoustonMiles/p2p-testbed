@@ -30,7 +30,8 @@ class FakeTestbed:
     def versions(self):
         return {"git_dirty": False}
 
-    def up(self, env):
+    def up(self, cfg):
+        env = cfg.env
         if self.fail_up:
             raise TestbedError("compose failed")
         self.started.append(env["NET_PROFILE"])

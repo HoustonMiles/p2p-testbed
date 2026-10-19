@@ -15,7 +15,7 @@ It returns a flat dict of metrics. The key "ok" (True/False) says whether
 the trial succeeded; any other keys become columns in the results.
 
 Available types:
-  nat_verify  RFC 5780 mapping/filtering check from both peers
+  nat_verify  RFC 5780 mapping/filtering check from every peer
   ping        round-trip time from each peer to a WAN host, through NAT + shaping
   command     run your own command on peer-a and/or peer-b (the hook for the
               Go client); each prints one JSON line of results at the end
@@ -29,7 +29,7 @@ import statistics
 from dataclasses import dataclass, field
 from string import Template
 
-STUN_IP = "203.0.113.100"
+from p2prunner.topology import STUN_IP
 
 
 @dataclass
@@ -104,9 +104,10 @@ def measure_behaviour(tb, side: str, raw: dict) -> tuple[str, str]:
 
 
 def nat_verify(tb, cfg, params, ctx) -> dict:
-    measured = tb.parallel({s: (lambda s=s: measure_behaviour(tb, s, ctx.raw)) for s in "ab"})
+    names = [p.name for p in cfg.peers]
+    measured = tb.parallel({s: (lambda s=s: measure_behaviour(tb, s, ctx.raw)) for s in names})
     metrics, ok = {}, True
-    for side in "ab":
+    for side in names:
         exp_m, exp_f = expected_behaviour(cfg, side)
         got_m, got_f = measured[side]
         metrics.update({
@@ -154,19 +155,19 @@ def ping_once(tb, source: str, plan: PingPlan, raw: dict) -> dict:
 def ping(tb, cfg, params, ctx) -> dict:
     """Measures each side's access path: home NAT (+ CGN) + latency shaping.
 
-    Both peers ping at the same time, so result columns are prefixed with
-    a_ and b_ (e.g. a_rtt_ms_mean). Each home router delays only its own
+    Every peer pings at the same time, so result columns are prefixed with
+    its name (e.g. a_rtt_ms_mean). Each home router delays only its own
     outgoing traffic, so the expected RTT to a WAN host is HALF the
     profile's peer-to-peer RTT (local 5 ms, coast 35 ms, transatlantic 75 ms).
 
     params (all optional):
-      sources    containers to ping from       (default ["peer-a", "peer-b"])
+      sources    containers to ping from       (default every peer)
       target     IP to ping                    (default the STUN server)
       count      number of pings               (default 50)
       interval_s seconds between pings         (default 0.2)
       warmup     first N replies to discard    (default 5; e.g. ARP lookups)
     """
-    sources = params.get("sources", ["peer-a", "peer-b"])
+    sources = params.get("sources", [f"peer-{p.name}" for p in cfg.peers])
     plan = PingPlan.from_params(params)
     results = tb.parallel({src: (lambda src=src: ping_once(tb, src, plan, ctx.raw)) for src in sources})
     metrics = {"target": plan.target, "pings_sent": plan.count, "warmup": plan.warmup}

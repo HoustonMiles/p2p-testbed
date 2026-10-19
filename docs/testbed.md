@@ -3,8 +3,11 @@
 ## Requirements
 
 - Linux with Docker Engine and the Compose plugin
-- Kernel modules: `sch_netem`, `ifb`, and the ipset modules (all loaded by
-  `testbed/load-kernel-modules.sh`, once per boot)
+- Kernel modules `sch_netem`, `ifb` and the ipset modules, and a larger ARP
+  table for more than about 30 peers: `testbed/prepare-host.sh` does both,
+  once per boot. `p2prunner up` refuses a testbed the ARP table cannot hold
+  (past its limit, routers lose track of each other and punches fail as if
+  a NAT blocked them).
 - Host reverse-path filtering must be off or "loose". Docker sends traffic
   between containers through the host firewall, and a strict check drops NAT
   replies on the LAN bridges. On NixOS:
@@ -18,10 +21,39 @@
     iptables -t mangle -I nixos-fw-rpfilter -i br-+ -j RETURN
   '';
   boot.kernelModules = [ "sch_netem" "ifb" "ip_set" "ip_set_bitmap_port" "ip_set_hash_ipport" "xt_set" ];
+  boot.kernel.sysctl = {
+    "net.ipv4.neigh.default.gc_thresh1" = 65536;
+    "net.ipv4.neigh.default.gc_thresh2" = 262144;
+    "net.ipv4.neigh.default.gc_thresh3" = 524288;
+  };
   ```
 
-  Tailscale also uses 100.64.0.0/10, the same range as the carrier networks.
-  Stop `tailscaled` during experiments if CGNAT runs misbehave.
+## Peers
+
+Each peer is one household: a computer (`peer-x`) behind its home router
+(`nat-x`), optionally behind its ISP's carrier-grade NAT (`cgn-x`). Peers
+are named like spreadsheet columns: `a` ... `z`, `aa` ... `iu` (255 at most).
+
+The committed `docker-compose.yml` has two peers, `a` and `b`, each with a
+CGN it may sit behind. For more, the runner writes the stack to
+`.testbed/compose.yml` (gitignored) from `p2prunner/compose.py`:
+
+```bash
+uv run python -m p2prunner up --peers 8 --cgn e,f   # 8 peers; e and f get a CGN
+uv run python -m p2prunner compose --peers 8        # just print the file
+uv run python -m p2prunner down                     # back to the committed two peers
+```
+
+While `.testbed/compose.yml` exists, `smoke`, `verify` and the runner use
+it; plain `docker compose` commands still use the committed file (add
+`-f .testbed/compose.yml --project-directory .`). Experiments set the
+number of peers per configuration (`peers`, see [running.md](running.md)).
+
+**How many peers.** In a 4-CPU VM, 32 peers (66 containers) ran a full
+direct mesh cleanly: 992 links hop-connected in 11 s. At 64 peers the
+machine was CPU-bound (load average ~700, mostly Docker's per-container
+processes) and links failed for that reason alone. The limit is the
+host's CPU; check `uptime` while a large run is going.
 
 ## Choosing a configuration
 
@@ -34,32 +66,38 @@ NAT_A_TYPE=symmetric NAT_B_UPSTREAM=cgnat NET_PROFILE=coast \
 ```
 
 Containers must be recreated (`down` then `up`) for new settings to apply.
-The experiment runner sets these itself for each configuration.
+The experiment runner sets these itself for each configuration. `X` below
+is a peer's name in capitals (`A`, `B`, ..., `AA`).
 
 | Variable | Values (default first) | Meaning |
 |---|---|---|
-| `NAT_A_TYPE`, `NAT_B_TYPE` | `port_restricted`, `full_cone`, `restricted`, `symmetric` | Home router behaviour |
-| `NAT_A_UPSTREAM`, `NAT_B_UPSTREAM` | `wan`, `cgnat` | Public IP on the home router, or behind the ISP's CGN |
-| `CGN_A_TYPE`, `CGN_B_TYPE` | same as NAT types | CGN behaviour (only used with `cgnat`) |
+| `NAT_X_TYPE` | `port_restricted`, `full_cone`, `restricted`, `symmetric` | Home router behaviour |
+| `NAT_X_UPSTREAM` | `wan`, `cgnat` | Public IP on the home router, or behind the ISP's CGN (needs a CGN in the stack) |
+| `CGN_X_TYPE` | same as NAT types | CGN behaviour (only used with `cgnat`) |
 | `NET_PROFILE` | `local`, `coast`, `transatlantic`, `none`, `custom` | Distance profile (10 / 70 / 150 ms RTT) |
 | `UPLINK_MBIT`, `DOWNLINK_MBIT` | empty = no cap | Access link capacity. **Set `DOWNLINK_MBIT` for flood tests.** |
+| `NET_PROFILE_X`, `UPLINK_MBIT_X`, `DOWNLINK_MBIT_X` | empty = the global setting | One peer's own access link |
 | `UDP_TIMEOUT`, `UDP_TIMEOUT_STREAM` | `30`, `120` | Seconds an idle UDP pinhole stays open |
 | `DEBUG` | `0`, `1` | Print each router's iptables rules at startup |
 
 ## Addresses
 
+Defined once, in `p2prunner/topology.py`. For peer number k (a = 1, b = 2, ...):
+
 | Host | Address(es) |
 |---|---|
-| peer-a / peer-b | 192.168.10.10 / 192.168.20.10 |
-| nat-a | LAN 192.168.10.2, WAN 203.0.113.10, carrier 100.64.1.10 |
-| nat-b | LAN 192.168.20.2, WAN 203.0.113.20, carrier 100.64.2.10 |
-| cgn-a / cgn-b | carrier 100.64.1.2 / 100.64.2.2, WAN 203.0.113.11 / 203.0.113.21 |
-| stun | 203.0.113.100 and alternate 203.0.113.103, UDP/TCP 3478 and 3479 |
-| rendezvous | 203.0.113.101, UDP 7000 |
-| reserved | .102 coturn relay, .200+ attackers |
+| peer-x | 10.200.k.10 |
+| nat-x | LAN 10.200.k.2, WAN 198.18.k.10, carrier 10.201.k.10 |
+| cgn-x | carrier 10.201.k.2, WAN 198.18.k.11 |
+| stun | 198.18.0.100 and alternate 198.18.0.103, UDP/TCP 3478 and 3479 |
+| rendezvous | 198.18.0.101, UDP 7000 |
+| reserved | 198.18.0.102 coturn relay, 198.18.0.200+ attackers |
 
-A side's public IP is its home router's WAN IP, or its CGN's WAN IP when
-`UPSTREAM=cgnat`.
+A peer's public IP is its home router's WAN IP, or its CGN's WAN IP when
+`UPSTREAM=cgnat`. The WAN is 198.18.0.0/15, the range reserved for
+benchmark networks (RFC 2544), so it never clashes with a real network.
+Real carrier networks use 100.64.0.0/10 (RFC 6598), but so does Tailscale,
+so the testbed's use 10.201.k.0/24; the routers never look at the range.
 
 ## How the NAT types are built
 
@@ -81,8 +119,8 @@ is what RFC 5780 NAT behaviour discovery needs. The peers include coturn's
 client tools:
 
 ```bash
-docker compose exec peer-a timeout 3 turnutils_stunclient 203.0.113.100      # your public address
-docker compose exec peer-a turnutils_natdiscovery -m -f 203.0.113.100        # mapping + filtering tests
+docker compose exec peer-a timeout 3 turnutils_stunclient 198.18.0.100      # your public address
+docker compose exec peer-a turnutils_natdiscovery -m -f 198.18.0.100        # mapping + filtering tests
 ```
 
 `turnutils_stunclient` keeps waiting for RFC 5780 replies that a filtering
@@ -105,7 +143,7 @@ NAT correctly blocks, so give it a `timeout`.
   Without it, Docker drops the routed traffic our NAT routers rely on.
 - **No host masquerading:** the networks also set `enable_ip_masquerade: false`.
   Otherwise Docker's host rule rewrites the source of the first packet of a
-  flow that a cone NAT forwards from the WAN onto a LAN (to 192.168.x.1), and
+  flow that a cone NAT forwards from the WAN onto a LAN (to the LAN bridge, 10.200.k.1), and
   the peer replies to an address that doesn't exist. This only affected
   unsolicited inbound traffic; the NAT matrix verdicts and ping baselines
   recorded before the fix are unaffected.

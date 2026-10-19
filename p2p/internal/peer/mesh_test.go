@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +112,63 @@ func TestLoopbackMemberLeaves(t *testing.T) {
 				t.Errorf("%s->c: error %q, want that c left", name, r.Error)
 			case member != "c":
 				checkRow(t, name+"->"+member, r)
+			}
+		}
+	}
+}
+
+// A link that never punches keeps both its peers punching for the whole
+// PunchTimeout; b, whose links all punched at once, must wait for them at
+// the next barrier instead of giving up on both. Seen in the testbed: a
+// symmetric NAT's members failed their good links at random.
+func TestLoopbackLinkNeverPunches(t *testing.T) {
+	addr := map[string]netip.Addr{"a": netip.MustParseAddr("127.0.0.2"), "c": netip.MustParseAddr("127.0.0.4")}
+	results := runRoom(t, []string{"a", "b", "c"}, Config{StepTimeout: time.Second}, func(c *Config) {
+		c.PunchTimeout = 2 * time.Second
+		c.unreachable = addr[map[string]string{"a": "c", "c": "a"}[c.Name]]
+	})
+	byID := map[string]string{}
+	for name, rows := range results {
+		byID[rows[0].ID] = name
+	}
+	for name, rows := range results {
+		for _, r := range rows {
+			member := byID[r.PeerID]
+			if pair := name + "->" + member; pair == "a->c" || pair == "c->a" {
+				if r.Punched || r.Error != "" {
+					t.Errorf("%s: punched %v, error %q; want a result without a punch", pair, r.Punched, r.Error)
+				}
+			} else {
+				checkRow(t, pair, r)
+			}
+		}
+	}
+}
+
+// The same after the handshake: a does not trust c's key, so c waits out
+// its handshake timeout on that link while b, done with both, waits for c.
+func TestLoopbackHandshakeNeverEnds(t *testing.T) {
+	names := []string{"a", "b", "c"}
+	cfg := directConfig("kk", "file")
+	cfg.StepTimeout = time.Second
+	results := runRoom(t, names, cfg, trustRoom(names), func(c *Config) {
+		if c.Name == "a" {
+			c.Direct.TrustedKeys = [][]byte{testKeys["b"].Public}
+		}
+	})
+	byID := map[string]string{}
+	for name, rows := range results {
+		byID[rows[0].ID] = name
+	}
+	for name, rows := range results {
+		for _, r := range rows {
+			member := byID[r.PeerID]
+			if pair := name + "->" + member; pair == "a->c" || pair == "c->a" {
+				if !strings.Contains(r.Error, "handshake") {
+					t.Errorf("%s: error %q, want a failed handshake", pair, r.Error)
+				}
+			} else if checkRow(t, pair, r); !r.HopConnected {
+				t.Errorf("%s: not hop connected", pair)
 			}
 		}
 	}

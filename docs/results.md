@@ -5,7 +5,7 @@
 | Part | State | Evidence |
 |---|---|---|
 | NAT routers: full cone, restricted, port-restricted, symmetric | done | `testbed/router/configure-router.sh` |
-| Carrier-grade NAT (optional, per side) | done | `cgn-a`, `cgn-b` |
+| Carrier-grade NAT (optional, per peer) | done | `cgn-x` |
 | Link emulation: latency, jitter, loss, uplink/downlink caps | done | netem + IFB on the home routers |
 | STUN server with RFC 5780 support | done | `testbed/stun/` (coturn, STUN-only) |
 | Smoke test and NAT verification | done | `p2prunner smoke`, `p2prunner verify` (`p2prunner/checks.py`) |
@@ -13,7 +13,7 @@
 | Trial types `nat_verify`, `ping`, `command` | done | `p2prunner/trials.py` |
 | Analysis notebook (early experiments only) | done | `analysis/results.ipynb` |
 | Raw UDP hole-punching baseline (STUN, rendezvous, punch, peer-to-peer RTT, throughput) | done, tests pass | `p2p/` (`punch`, `rendezvous`) |
-| Rendezvous server in the testbed | done | `rendezvous` service, 203.0.113.101:7000 |
+| Rendezvous server in the testbed | done | `rendezvous` service, 198.18.0.101:7000 |
 | Direct channel: Noise handshake (KK, IK or XX with static keys; `punch -genkey`), encrypted UDP transport with replay window | done, tests pass | `p2p/internal/noise/`, `p2p/internal/identity/` |
 | Port-hopping: clock-based HKDF port schedule, early open + probing, drain-based close | done, tests pass | `p2p/internal/direct/` |
 | `punch -direct`: handshake, port check, hopping, then ping + throughput through the hopper | done, tests pass | `p2p/internal/peer/`, `p2p/cmd/punch` |
@@ -22,6 +22,8 @@
 | Mesh step 2: rendezvous rooms (any number of members, joins and leaves), peer IDs on the wire, trusted key directories | done, tests pass | `p2p/internal/rendezvous/`, `p2p/internal/wire/`, `punch -name -room`, `-peer-key DIR` |
 | Mesh step 3a: receiver index in the Noise header; one shared pool of hop sockets per peer, so two links on the same port share a socket | done, tests pass | `p2p/internal/noise/session.go`, `p2p/internal/direct/ports.go` |
 | Mesh step 3b: link manager. One link per member (`-peers N`), punch, handshake, hop and pings on all links at once, throughput pair by pair in one global order, re-registration and PeerLeft, one result row per link | done, tests pass (3 and 4 peers on loopback, real binaries with 3) | `p2p/internal/peer/` (`link.go`, `punch.go`, `mesh_test.go`) |
+| Mesh step 4a: testbed of up to 255 peers. Address plan (WAN 198.18.0.0/15, LAN 10.200.k.0/24, carrier 10.201.k.0/24), generated compose file (`p2prunner up/compose/down --peers N --cgn ...`), a CGN only for the peers behind one, per-peer NAT and access link settings, matrix keys `peers` and `nats`, checks for every running peer, ARP table check | done, tests pass; in a 4-CPU VM: `verify --all` as 8 peers at once, smoke with 8, full direct mesh of 8 / 16 / 32 peers (56 / 240 / 992 links as RFC 4787 predicts; 32 in 11 s); 64 peers CPU-bound there | `p2prunner/topology.py`, `p2prunner/compose.py`, `testbed/prepare-host.sh` |
+| Mesh barrier waits: in rooms of 3+, a barrier allows for members held back by their other links' punch and handshake timeouts (8 peers failed good links at random before) | done, tests pass | `p2p/internal/peer/barrier.go` (`lag`), `mesh_test.go` |
 | Result reports (standard library only) | done | `p2prunner hops`, `p2prunner compare` (`p2prunner/reports.py`) |
 | Tests: Go unit + fuzz tests beside the code, Python `unittest` in `tests/` | done | [testing.md](testing.md) |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
@@ -35,8 +37,8 @@
 
 | Part | What it is for |
 |---|---|
-| Full mesh, steps 4-5: an N-peer testbed with per-link results; a mesh experiment (time to full mesh, hop success per link as N grows, port clashes) | The paper's system is a mesh of pairwise direct links |
-| Relay baseline: coturn as a TURN relay in the testbed (203.0.113.102), `punch -relay`, `relay_path` experiment | The comparison baseline, and the path for pairings that cannot hop |
+| Full mesh, step 4b and 5: a mesh trial type (every peer at once, `links.jsonl`), mesh-level columns (time to full mesh), per-peer clock offsets, staggered starts; a mesh experiment (hop success per link as N grows, port clashes) | The paper's system is a mesh of pairwise direct links |
+| Relay baseline: coturn as a TURN relay in the testbed (198.18.0.102), `punch -relay`, `relay_path` experiment | The comparison baseline, and the path for pairings that cannot hop |
 | Handoff Manager | Falls back to the relay when `hop_possible` is false or hopping stops holding |
 | Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |
 | Experiment C | Attack resilience, direct hopping vs relay (`hop_drain_cutoffs`, `hop_unrouted`, `hop_foreign`, `hop_auth_failed` are there for it) |
@@ -145,5 +147,13 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
   medians (0 vs 0 to 1%) match the coast profile's own ~1% round-trip loss.
 - Hopping needs endpoint-independent mapping that keeps the port on BOTH
   sides; with one symmetric side the hop path is one-way (Experiment A).
+- Testbed scale: 32 peers ran a clean full mesh in a 4-CPU VM; at 64 the
+  host was CPU-bound. Say which N were run on which hardware. The kernel's
+  ARP table (shared by all containers) must be raised past about 30 peers.
+- The barrier finding: in lockstep steps, one link that never punches holds
+  its peer back for the punch timeout, and that delay spreads to every
+  member waiting on that peer; barriers must allow for it. Per-link steps
+  (each link moving on as soon as it is ready) would avoid the delay, and
+  matter for time to full mesh.
 - Find and verify a citation on AI-driven attacks against moving-target
   defenses.

@@ -22,7 +22,7 @@ const ipUDPHeader = 28
 func (r *runner) measure() {
 	if r.cfg.Pings > 0 {
 		r.pingAll()
-		r.barrierAll(barrierWait{step: stepPinged, timeout: r.cfg.StepTimeout})
+		r.barrierAll(barrierWait{step: stepPinged, timeout: r.stepTimeout()})
 	}
 	for _, l := range r.testOrder() {
 		if r.cfg.RateMbit > 0 {
@@ -104,7 +104,7 @@ func (l *link) onPong(m inbound) {
 func (l *link) throughputTest() {
 	r := l.r
 	testTime := 2*(r.cfg.Duration+r.cfg.Drain) + 2*time.Second
-	ready := barrierWait{step: stepTestReady, timeout: r.cfg.StepTimeout + time.Duration(l.pairsAhead())*testTime}
+	ready := barrierWait{step: stepTestReady, timeout: r.stepTimeout() + time.Duration(l.pairsAhead())*testTime}
 	if missed := r.barrier([]*link{l}, ready); len(missed) > 0 {
 		l.fail(ready.errFor(l))
 		return
