@@ -16,7 +16,7 @@
 #
 # Expected if the explanation is right: rx_loss and rx_ip_mbit back to the
 # punch_path values. Compare with:
-#   python3 scripts/compare_runs.py results/punch_path/<run> results/direct_path_overlap/<run>
+#   uv run python -m p2prunner compare results/punch_path/<run> results/direct_path_overlap/<run>
 #
 #   uv run python -m p2prunner run experiments/direct_path_overlap.toml
 # =============================================================================

@@ -7,7 +7,6 @@ results
 analysis
 experiments
 p2prunner
-scripts
 **/__pycache__
 **/.ipynb_checkpoints
 *.md
