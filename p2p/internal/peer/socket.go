@@ -3,10 +3,10 @@ package peer
 import (
 	"net"
 	"net/netip"
-	"p2ptestbed/p2p/internal/direct"
+	"time"
+
 	"p2ptestbed/p2p/internal/stun"
 	"p2ptestbed/p2p/internal/wire"
-	"time"
 )
 
 func (r *runner) listen() error {
@@ -23,7 +23,7 @@ func (r *runner) listen() error {
 	return nil
 }
 
-// linger keeps answering the peer, which may still be finishing a step.
+// linger keeps answering the members, which may still be finishing a step.
 func (r *runner) linger() { r.pump(r.cfg.Linger, 0, nil, never) }
 
 // readLoop reads the punched socket on its own goroutine.
@@ -45,20 +45,16 @@ func (r *runner) readLoop() {
 	}
 }
 
-// onHop takes the Hopper's decrypted packets, whose payload is a wire packet.
-func (r *runner) onHop(in direct.Inbound) {
-	r.deliver(inbound{from: in.From, at: in.At.Sub(r.t0), hop: true}, in.Payload)
-}
-
-// deliver counts Data packets on the spot (they can arrive at line rate) and
-// queues everything else for the main loop.
+// deliver finds the packet's link, counts Data on the spot (it can arrive
+// at line rate) and queues everything else for the main loop. Packets from
+// a link's Hopper come with their link set and must be from that member.
 func (r *runner) deliver(m inbound, b []byte) {
 	p, ok := wire.Parse(b)
-	if !ok || p.Room != r.cfg.Room || !r.accepts(p) {
+	if !ok || p.Room != r.cfg.Room || !r.accepts(&m, p) {
 		return
 	}
 	if p.Type == wire.Data {
-		r.countData(m.at, len(b))
+		m.link.countData(m.at, len(b))
 		return
 	}
 	p.Body = append([]byte(nil), p.Body...)
@@ -67,7 +63,7 @@ func (r *runner) deliver(m inbound, b []byte) {
 		r.in <- m
 		return
 	}
-	// Never block a Hopper reader: Close waits for them, and the main loop
+	// Never block a Hopper's reader: Close waits for it, and the main loop
 	// may have stopped reading. A full queue counts as loss.
 	select {
 	case r.in <- m:
@@ -75,13 +71,26 @@ func (r *runner) deliver(m inbound, b []byte) {
 	}
 }
 
-// accepts packets from the rendezvous (ID 0) and from the member we were
-// introduced to; nothing from anyone before the introduction.
-func (r *runner) accepts(p wire.Packet) bool {
+// accepts packets from the rendezvous (ID 0, its two message types only)
+// and from members we were introduced to, and sets m.link for the latter.
+func (r *runner) accepts(m *inbound, p wire.Packet) bool {
 	if p.Type == wire.PeerInfo || p.Type == wire.PeerLeft {
-		return p.From == 0
+		return p.From == 0 && !m.hop
 	}
-	return p.From != 0 && p.From == r.peerID.Load()
+	if m.link != nil {
+		return p.From == m.link.peerID
+	}
+	m.link = r.link(p.From)
+	return m.link != nil
+}
+
+func (r *runner) link(id uint64) *link {
+	if id == 0 {
+		return nil
+	}
+	r.linksMu.RLock()
+	defer r.linksMu.RUnlock()
+	return r.links[id]
 }
 
 func never() bool { return false }
@@ -114,54 +123,31 @@ func (r *runner) pump(timeout, tick time.Duration, onTick func(), done func() bo
 	return true
 }
 
-// handlers answer in every step, so a peer one step behind still gets
+// linkHandlers answer in every step, so a member one step behind still gets
 // its PunchAck, Pong or BarrierAck.
-var handlers = map[wire.Type]func(*runner, inbound){
-	wire.PeerInfo:   (*runner).onPeerInfo,
-	wire.Punch:      (*runner).onPunch,
-	wire.PunchAck:   (*runner).onPunchAck,
-	wire.Ping:       (*runner).onPing,
-	wire.Pong:       (*runner).onPong,
-	wire.Barrier:    (*runner).onBarrier,
-	wire.BarrierAck: (*runner).onBarrierAck,
-	wire.Handshake:  (*runner).onHandshake,
+var linkHandlers = map[wire.Type]func(*link, inbound){
+	wire.Punch:      (*link).onPunch,
+	wire.PunchAck:   (*link).onPunchAck,
+	wire.Ping:       (*link).onPing,
+	wire.Pong:       (*link).onPong,
+	wire.Barrier:    (*link).onBarrier,
+	wire.BarrierAck: (*link).onBarrierAck,
+	wire.Handshake:  (*link).onHandshake,
 }
 
 func (r *runner) handle(m inbound) {
-	if m.stun != nil {
+	switch {
+	case m.stun != nil:
 		r.onSTUN(m)
-		return
+	case m.link != nil:
+		if h := linkHandlers[m.pkt.Type]; h != nil {
+			h(m.link, m)
+		}
+	case m.pkt.Type == wire.PeerInfo:
+		r.onPeerInfo(m)
+	case m.pkt.Type == wire.PeerLeft:
+		r.onPeerLeft(m)
 	}
-	if h := handlers[m.pkt.Type]; h != nil {
-		h(r, m)
-	}
-}
-
-// reply answers m the way it came, so a peer still one step behind (before
-// its Hopper is up) keeps getting answers on the punched socket.
-func (r *runner) reply(m inbound, t wire.Type, seq uint64, body []byte) {
-	if m.hop && r.hopper != nil {
-		r.sendHop(wire.Packet{Type: t, Seq: seq, Body: body})
-		return
-	}
-	r.sendTo(m.from, t, seq, body)
-}
-
-// sendPeer uses the Hopper once it runs, the punched socket before.
-func (r *runner) sendPeer(t wire.Type, seq uint64, body []byte) {
-	if r.hopper != nil {
-		r.sendHop(wire.Packet{Type: t, Seq: seq, Body: body})
-		return
-	}
-	r.sendTo(r.remote, t, seq, body)
-}
-
-func (r *runner) sendHop(p wire.Packet) {
-	if r.cfg.Direct.dropHopSends {
-		return
-	}
-	p.Room, p.From = r.cfg.Room, r.id
-	r.hopper.Send(p.Append(nil)) // errors count as loss
 }
 
 func (r *runner) sendTo(to netip.AddrPort, t wire.Type, seq uint64, body []byte) {

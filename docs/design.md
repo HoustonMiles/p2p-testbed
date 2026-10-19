@@ -8,12 +8,13 @@ code (`_test.go`). Dependencies only point down this list.
 
 ```
 p2p/
-  cmd/punch/          the peer program: flags -> peer.Run -> one JSON line
+  cmd/punch/          the peer program: flags -> peer.Run -> one JSON line per link
   cmd/rendezvous/     the rendezvous program
   internal/
-    peer/             one peer's run: socket.go (the one socket, dispatch), meet.go (STUN,
-                      rendezvous), link.go (punch -> secure -> hop), handshake.go, hop.go,
-                      barrier.go, measure.go, result.go; loopback_test.go runs whole trials
+    peer/             one peer's run, with one link per member: peer.go (the steps),
+                      socket.go (the one socket, dispatch to links), meet.go (STUN, rendezvous),
+                      link.go (one link's state), punch.go, handshake.go, hop.go, barrier.go,
+                      measure.go, result.go; loopback_test.go and mesh_test.go run whole trials
     rendezvous/       rooms: server.go, and client.go (a member's side)
     stun/             STUN messages
     direct/           the port-hopping channel: schedule, hopper, slots, probe, drain, receive
@@ -37,15 +38,30 @@ Both programs are compiled into the peer image
   per other member (its address, ID and key), and each of them is told about
   the sender. A member not refreshed for `-ttl` (5 s) is dropped and the rest
   of the room is sent PeerLeft. It never relays peer traffic.
-- `punch` runs on both peers at once, on one UDP socket: STUN, registration
-  in the room, hole punching with the first member introduced (switching to
-  its real address if its packets arrive from a different port), peer-to-peer
-  pings, then throughput: the peer with the lower ID sends first, then the
-  other. It prints one JSON line of results at the end.
+- `punch` runs on every member of a room at once (`-peers N`, default 2),
+  on one UDP socket: STUN, registration in the room until the other N-1
+  members are introduced, hole punching with all of them at once (switching
+  to a member's real address if its packets arrive from a different port),
+  pings to all of them at once, then throughput one link at a time: in each
+  pair the peer with the lower ID sends first, then the other. It prints one
+  JSON line of results per link at the end.
+
+**A full mesh.** Each member keeps one link per other member, and each
+link's steps meet at their own barriers, so a link that fails (no punch, no
+hop, a member that left) ends with its result and the others go on. The
+throughput tests run pair by pair in one order every member computes the
+same way, sorted by the pair's IDs: no two members can wait on each other in
+a cycle, and no two tests share a peer's link capacity (a "ready" barrier
+starts each pair's test). Pairs with no member in common may test at the
+same time. While running, each member re-registers every second, so the
+rendezvous never expires it; if a member does leave, links still waiting on
+it fail at once ("left the room") instead of timing out. Members that come
+after the meeting are ignored; with fewer than N-1 after
+`-rendezvous-timeout`, the run goes on with those it met (`members`).
 
 Every packet carries the room and the sender's peer ID (the start of its
 static key in direct mode, random otherwise); a peer accepts packets only
-from the member it was introduced to.
+from members it was introduced to, and routes each to its link.
 
 No encryption and no port-hopping: these numbers are the floor that the Noise
 channel and the relay are compared against.
@@ -134,10 +150,14 @@ mount it.
 
 ## Result columns
 
-Every run reports `name`, `room`, `id` and `peer_id` (mesh step 2; before
-it, `name` and `room` were `role` and `session`), the STUN, rendezvous and
-punch steps, and the ping and throughput measurements (`rtt_ms_*`, `tx_*`,
-`rx_*`).
+One row per link. The peer's own columns repeat in each of its rows:
+`name`, `room`, `id`, `members` (the room's members it met, itself
+included), `local`, `stun_*`, `rdv_addr`, `mapping_varies` and the settings.
+The link's own: `peer_id` (the member at the other end), `error`, the
+rendezvous and punch steps, the ping and throughput measurements
+(`rtt_ms_*`, `tx_*`, `rx_*`), and `rx_start_ms` / `rx_end_ms` (when the
+link's Data arrived, since start: the test's place in the run). Before mesh
+step 2, `name` and `room` were `role` and `session`.
 
 Direct mode adds: `direct`, `noise`, `peer_key_from`, `initiator`,
 `handshake_ms`, `keeps_port`, `peer_keeps_port`, `hop_possible`, `hopping`,
@@ -146,7 +166,7 @@ and the hopper's counters, all prefixed `hop_`:
 
 | Column | Meaning |
 |---|---|
-| `hop_hops_ok`, `hop_hops_missed` | slots on which something from the peer arrived on our port (the slot running at start is not counted) |
+| `hop_hops_ok`, `hop_hops_missed` | slots on which something from the peer arrived on our port, until the link's measurements ended (the slot running at start is not counted; nor, since mesh step 3b, the linger at the end) |
 | `hop_sent`, `hop_received`, `hop_send_errors` | Data packets |
 | `hop_probes_sent`, `hop_probes_recv` | pinhole probes |
 | `hop_unrouted` | dropped on arrival, peer-wide (the same in every link's row): the receiver index named none of this peer's links, including packets too short to have one |

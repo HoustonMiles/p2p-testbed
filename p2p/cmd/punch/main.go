@@ -1,16 +1,18 @@
 // punch runs one peer of a peer-to-peer trial: raw UDP by default, the
 // Port-Hopping Direct Channel with -direct. Peers meet in a room at the
-// rendezvous; the first member introduced becomes the link.
+// rendezvous and link with every other member (a full mesh).
 //
 //	punch -name a -room 42         # on peer-a
 //	punch -name b -room 42         # on peer-b, at the same time
 //	punch -name a -room 42 -direct -hop-interval 1s
+//	punch -name a -room 42 -peers 3   # a room of three: links to both others
 //	punch -genkey /keys/a          # write /keys/a.key and /keys/a.pub, then exit
 //
-// Progress goes to stderr; the last line of stdout is one JSON object with
-// every measurement, as the runner's "command" trial type expects. Exit
-// status 0 means the run completed (a failed punch or hop is a result),
-// 1 that the run itself broke, 2 a usage error.
+// Progress goes to stderr; stdout gets one JSON object per link with every
+// measurement, so with two peers the last (only) line is what the runner's
+// "command" trial type expects. Exit status 0 means the run completed (a
+// failed punch or hop is a result), 1 that the run or a link broke, 2 a
+// usage error.
 package main
 
 import (
@@ -56,25 +58,32 @@ func main() {
 }
 
 func run(c peer.Config) int {
-	res, err := peer.Run(c)
-	out, _ := json.Marshal(res)
-	fmt.Println(string(out))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		return 1
+	rows, err := peer.Run(c)
+	status := 0
+	for _, row := range rows {
+		out, _ := json.Marshal(row)
+		fmt.Println(string(out))
+		if row.Error != "" {
+			fmt.Fprintf(os.Stderr, "error (link %s): %s\n", row.PeerID, row.Error)
+			status = 1
+		}
 	}
-	return 0
+	if err != nil {
+		status = 1
+	}
+	return status
 }
 
 // TODO(paper §5 Simulation Environment): these addresses mirror
 // docker-compose.yml; read them from the environment so they are defined once.
 func connectFlags(c *peer.Config) {
 	flag.Uint64Var(&c.Room, "room", 0, "rendezvous room shared by the peers that should meet, e.g. the trial seed (required)")
+	flag.IntVar(&c.Peers, "peers", 2, "members of the room, this peer included; links are made with all the others")
 	flag.StringVar(&c.Local, "local", ":0", "local UDP address to bind")
 	flag.StringVar(&c.STUN, "stun", "203.0.113.100:3478", `STUN server ("" to skip)`)
 	flag.StringVar(&c.Rendezvous, "rendezvous", "203.0.113.101:7000", "rendezvous server")
 	flag.DurationVar(&c.STUNTimeout, "stun-timeout", 2*time.Second, "give up on STUN after this long")
-	flag.DurationVar(&c.RendezvousTimeout, "rendezvous-timeout", 15*time.Second, "wait this long for another member of the room")
+	flag.DurationVar(&c.RendezvousTimeout, "rendezvous-timeout", 15*time.Second, "wait this long for the other members of the room")
 	flag.DurationVar(&c.PunchTimeout, "punch-timeout", 10*time.Second, "give up hole punching after this long")
 	flag.DurationVar(&c.PunchInterval, "punch-interval", 50*time.Millisecond, "time between punch packets")
 	flag.DurationVar(&c.StepTimeout, "step-timeout", 10*time.Second, "wait this long for the other peer between steps")

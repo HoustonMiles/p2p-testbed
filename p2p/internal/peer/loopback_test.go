@@ -2,49 +2,15 @@ package peer
 
 import (
 	"bytes"
-	"net"
-	"p2ptestbed/p2p/internal/identity"
-	"p2ptestbed/p2p/internal/rendezvous"
-	"p2ptestbed/p2p/internal/stun"
-	"sync"
 	"testing"
 	"time"
 )
 
-// End to end on loopback, no NAT: a fake STUN server, the real rendezvous
-// server and both peers. Checks every step completes and reports sensibly.
+// The two-peer runs. End to end on loopback, no NAT (see harness_test.go):
+// checks every step completes and reports sensibly.
 func TestLoopback(t *testing.T) {
 	results := runPair(t, Config{})
 	checkResults(t, results)
-}
-
-// Each peer's static keypair, made once for all tests.
-var testKeys = func() map[string]identity.Keypair {
-	keys := map[string]identity.Keypair{}
-	for _, name := range []string{"a", "b", "x"} { // x belongs to nobody in the trial
-		kp, err := identity.NewKeypair()
-		if err != nil {
-			panic(err)
-		}
-		keys[name] = kp
-	}
-	return keys
-}()
-
-func other(name string) string { return map[string]string{"a": "b", "b": "a"}[name] }
-
-// directConfig is a direct-mode setup; withKeys gives each peer its own key
-// and, with PeerKeyFrom "file", trusts the other's public key.
-func directConfig(pattern, peerKeyFrom string) Config {
-	return Config{Direct: &DirectConfig{Noise: pattern, PeerKeyFrom: peerKeyFrom,
-		HandshakeTimeout: 2 * time.Second, HopInterval: 150 * time.Millisecond}}
-}
-
-func withKeys(c *Config) {
-	c.Direct.Key = testKeys[c.Name]
-	if c.Direct.PeerKeyFrom == "file" {
-		c.Direct.TrustedKeys = [][]byte{testKeys[other(c.Name)].Public}
-	}
 }
 
 // The same run through the direct channel: Noise handshake, then ping and
@@ -158,107 +124,4 @@ func TestLoopbackDirectOneWay(t *testing.T) {
 				name, r.Error, r.Hopping, r.HopConnected, r.PingsSent)
 		}
 	}
-}
-
-// runPair runs both peers against a fake STUN server and the real rendezvous
-// server. extra fills in the direct-mode fields; per (optional) adjusts one
-// peer's config.
-func runPair(t *testing.T, extra Config, per ...func(*Config)) map[string]*Result {
-	t.Helper()
-	stunConn := listen(t)
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, from, err := stunConn.ReadFromUDPAddrPort(buf)
-			if err != nil {
-				return
-			}
-			if stun.IsMessage(buf[:n]) {
-				stunConn.WriteToUDPAddrPort(stun.Response(stun.TxID(buf[8:20]), from), from)
-			}
-		}
-	}()
-	rdvConn := listen(t)
-	go (&rendezvous.Server{Conn: rdvConn, TTL: 5 * time.Second}).Serve()
-
-	results := map[string]*Result{}
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for _, name := range []string{"a", "b"} {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			c := Config{
-				Name: name, Room: 42, Local: "127.0.0.1:0",
-				STUN: stunConn.LocalAddr().String(), Rendezvous: rdvConn.LocalAddr().String(),
-				STUNTimeout: time.Second, RendezvousTimeout: 5 * time.Second,
-				PunchTimeout: 5 * time.Second, PunchInterval: 20 * time.Millisecond,
-				StepTimeout: 5 * time.Second,
-				Pings:       20, PingInterval: 5 * time.Millisecond, PingGrace: 200 * time.Millisecond,
-				RateMbit: 5, Duration: 300 * time.Millisecond, Size: 1000, Drain: 200 * time.Millisecond,
-				Linger: 100 * time.Millisecond, Logf: t.Logf,
-			}
-			if extra.Direct != nil {
-				d := *extra.Direct // each peer gets its own copy to adjust
-				c.Direct = &d
-			}
-			if extra.StepTimeout != 0 {
-				c.StepTimeout = extra.StepTimeout
-			}
-			for _, f := range per {
-				f(&c)
-			}
-			res, err := Run(c)
-			if err != nil {
-				t.Logf("%s: %v", name, err)
-			}
-			mu.Lock()
-			results[name] = res
-			mu.Unlock()
-		}()
-	}
-	wg.Wait()
-	return results
-}
-
-func checkResults(t *testing.T, results map[string]*Result) {
-	t.Helper()
-	for name, r := range results {
-		if r.Error != "" {
-			t.Errorf("%s: %s", name, r.Error)
-		}
-		if !r.Punched || r.PunchMs == nil {
-			t.Errorf("%s: not punched", name)
-		}
-		if r.STUNAddr == nil || *r.STUNAddr != r.Local || r.MappingVaries == nil || *r.MappingVaries {
-			t.Errorf("%s: stun %v, local %v", name, r.STUNAddr, r.Local)
-		}
-		if r.PeerAddrChanged == nil || *r.PeerAddrChanged {
-			t.Errorf("%s: peer address changed without a NAT", name)
-		}
-		if r.PingsRecv != 20 || r.RTTP50 == nil {
-			t.Errorf("%s: %d/20 pings", name, r.PingsRecv)
-		}
-		if r.TxPackets == nil || *r.TxPackets == 0 {
-			t.Errorf("%s: sent nothing", name)
-		}
-		if r.RxPackets == nil || r.RxPeerSent == nil || *r.RxPackets != *r.RxPeerSent || *r.RxLoss != 0 {
-			t.Errorf("%s: received %v of %v", name, r.RxPackets, r.RxPeerSent)
-		}
-		if r.RxMbit == nil || *r.RxMbit < 3 || *r.RxMbit > 7 {
-			t.Errorf("%s: rx rate %v, want about 5 Mbit/s", name, r.RxMbit)
-		}
-	}
-	if *results["a"].TxPackets != *results["b"].RxPeerSent {
-		t.Error("b did not learn how many packets a sent")
-	}
-}
-
-func listen(t *testing.T) *net.UDPConn {
-	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { c.Close() })
-	return c
 }

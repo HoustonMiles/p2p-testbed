@@ -1,100 +1,151 @@
 package peer
 
 import (
+	"fmt"
 	"net/netip"
-	"p2ptestbed/p2p/internal/wire"
+	"sync"
 	"time"
+
+	"p2ptestbed/p2p/internal/direct"
+	"p2ptestbed/p2p/internal/noise"
+	"p2ptestbed/p2p/internal/wire"
 )
 
-// connect runs steps 1-3 and the barrier after them. It returns false
-// without an error when the punch fails, which is a result.
-func (r *runner) connect() (bool, error) {
-	var err error
-	if r.rdv, err = r.rendezvousClient(); err != nil {
-		return false, err
-	}
-	if r.cfg.STUN != "" {
-		if err := r.doSTUN(); err != nil {
-			r.logf("stun: %v (continuing without it)", err)
+// link is this peer's side of the link with one other member of the room.
+// Only the main loop touches it, except rx, which the readers count.
+type link struct {
+	r       *runner
+	peerID  uint64
+	rdvKey  []byte         // the peer's static key, as the rendezvous announced it
+	rdvAddr netip.AddrPort // the peer's address, as the rendezvous saw it
+	remote  netip.AddrPort // where its traffic goes; updated by learn
+	res     LinkResult
+
+	err     error // the link failed; its row carries the error
+	stopped bool  // the link ended early with a result (no punch, no hop)
+	left    bool  // the rendezvous said the member left
+
+	gotAck bool
+	ackAt  time.Duration
+	barrierState
+	rtts map[uint64]float64
+
+	rxMu sync.Mutex // the reader goroutines count Data here
+	rx   rxCounts
+
+	hs         *noise.Handshake
+	handshakeT time.Duration  // when our handshake began, since start
+	hopper     *direct.Hopper // once set, all traffic to the member goes through it
+	hopStats   *direct.Stats  // frozen when the link's measurements end
+}
+
+func newLink(r *runner, in wire.Intro, at time.Duration) *link {
+	l := &link{r: r, peerID: in.PeerID, rdvAddr: in.Peer, remote: in.Peer,
+		rdvKey: append([]byte(nil), in.PeerKey...), rtts: map[uint64]float64{}, barrierState: newBarrierState()}
+	l.res.PeerID = idString(in.PeerID)
+	l.res.RendezvousMs = ptr(ms(at))
+	l.res.PeerRdvAddr = ptr(in.Peer.String())
+	return l
+}
+
+// testOrder is the order of our throughput tests: active links by peer ID,
+// which is also the order of their pairs sorted by (lower ID, higher ID).
+// Every member walks its pairs in that one global order, so no two members
+// ever wait on each other in a cycle.
+func (r *runner) testOrder() []*link { return r.active() }
+
+// active returns the links still taking part, sorted by peer ID.
+func (r *runner) active() []*link {
+	var ls []*link
+	for _, l := range r.sortedLinks() {
+		if l.err == nil && !l.stopped {
+			ls = append(ls, l)
 		}
 	}
-	if err := r.meetAtRendezvous(); err != nil {
-		return false, err
-	}
-	if !r.punch() {
-		return false, nil
-	}
-	return true, r.barrier(stepConnected, 0, r.cfg.StepTimeout)
+	return ls
 }
 
-// punch sends Punch until a PunchAck arrives. Behind an endpoint-dependent
-// NAT the peer answers from another address than the rendezvous saw; learn
-// switches to it.
-func (r *runner) punch() bool {
-	introducedAt := time.Since(r.t0)
-	r.pump(r.cfg.PunchTimeout, r.cfg.PunchInterval,
-		func() { r.res.PunchesSent++; r.sendTo(r.remote, wire.Punch, uint64(r.res.PunchesSent), nil) },
-		func() bool { return r.gotAck })
-	r.res.PeerAddr = ptr(r.remote.String())
-	r.res.PeerAddrChanged = ptr(r.remote != r.peerRdv)
-	if !r.gotAck {
-		r.logf("punch: no reply from %v after %v", r.remote, r.cfg.PunchTimeout)
-		return false
+type pair struct{ lo, hi uint64 }
+
+func (r *runner) pair(peerID uint64) pair { return pair{min(r.id, peerID), max(r.id, peerID)} }
+
+func pairLess(a, b pair) bool { return a.lo < b.lo || a.lo == b.lo && a.hi < b.hi }
+
+// pairsAhead counts the room's pairs that test before this link's: an upper
+// bound on how many tests the peer may run before it reaches ours.
+func (l *link) pairsAhead() int {
+	ids := []uint64{l.r.id}
+	for id := range l.r.links {
+		ids = append(ids, id)
 	}
-	r.res.Punched = true
-	r.res.PunchMs = ptr(ms(r.ackAt - introducedAt))
-	r.logf("punch: connected to %v in %.1f ms", r.remote, *r.res.PunchMs)
-	return true
+	ours, n := l.r.pair(l.peerID), 0
+	for i := range ids {
+		for j := range ids[:i] {
+			if pairLess(pair{min(ids[i], ids[j]), max(ids[i], ids[j])}, ours) {
+				n++
+			}
+		}
+	}
+	return n
 }
 
-func (r *runner) learn(from netip.AddrPort) {
-	if from == r.remote {
+// finish freezes the link's hop counters once its measurements are over.
+// The hopper keeps running, so the member still gets answers while it
+// finishes; but a member that is done and gone must not count as missed
+// hops while we test other pairs.
+func (l *link) finish() {
+	if l.hopper != nil && l.hopStats == nil {
+		st := l.hopper.Stats()
+		l.hopStats = &st
+	}
+}
+
+func (l *link) fail(err error) {
+	l.err = err
+	l.res.Error = err.Error()
+	l.logf("%v", err)
+}
+
+// stop ends the link early: a result, not an error.
+func (l *link) stop(why string) {
+	l.stopped = true
+	l.logf("%s", why)
+}
+
+func (l *link) logf(format string, args ...any) {
+	l.r.logf("%04x: "+format, append([]any{l.peerID >> 48}, args...)...)
+}
+
+// onHop takes the link's decrypted packets, whose payload is a wire packet.
+func (l *link) onHop(in direct.Inbound) {
+	l.r.deliver(inbound{from: in.From, at: in.At.Sub(l.r.t0), link: l, hop: true}, in.Payload)
+}
+
+// reply answers m the way it came, so a member still one step behind
+// (before its Hopper is up) keeps getting answers on the punched socket.
+func (l *link) reply(m inbound, t wire.Type, seq uint64, body []byte) {
+	if m.hop && l.hopper != nil {
+		l.sendHop(wire.Packet{Type: t, Seq: seq, Body: body})
 		return
 	}
-	if r.remote.IsValid() {
-		r.logf("punch: peer answers from %v, switching from %v", from, r.remote)
-	}
-	r.remote = from
+	l.r.sendTo(m.from, t, seq, body)
 }
 
-func (r *runner) onPunch(m inbound) {
-	r.res.PunchesRecv++
-	r.learn(m.from)
-	r.sendTo(m.from, wire.PunchAck, m.pkt.Seq, nil)
+// send uses the Hopper once it runs, the punched socket before.
+func (l *link) send(t wire.Type, seq uint64, body []byte) {
+	if l.hopper != nil {
+		l.sendHop(wire.Packet{Type: t, Seq: seq, Body: body})
+		return
+	}
+	l.r.sendTo(l.remote, t, seq, body)
 }
 
-func (r *runner) onPunchAck(m inbound) {
-	r.learn(m.from)
-	if !r.gotAck {
-		r.gotAck, r.ackAt = true, m.at
+func (l *link) sendHop(p wire.Packet) {
+	if l.r.cfg.Direct.dropHopSends {
+		return
 	}
+	p.Room, p.From = l.r.cfg.Room, l.r.id
+	l.hopper.Send(p.Append(nil)) // errors count as loss
 }
 
-// startDirect brings up the direct channel: Noise handshake, port check,
-// hopper, then a first hop proven both ways. It returns false without an
-// error when hopping cannot be used, which is a result.
-//
-// TODO(paper §5 Dynamic Handoff Mode): each false return here is where the
-// Handoff Manager should pivot to the relay instead of ending the run.
-func (r *runner) startDirect() (bool, error) {
-	if err := r.handshake(); err != nil {
-		return false, err
-	}
-	possible, err := r.checkPorts()
-	if err != nil {
-		return false, err
-	}
-	if !possible && !r.cfg.Direct.HopForce {
-		r.logf("hop: not possible (a NAT changes ports); the relay would take over")
-		return false, nil
-	}
-	if err := r.startHopper(); err != nil {
-		return false, err
-	}
-	if err := r.barrierBothWays(stepHopping, r.cfg.StepTimeout); err != nil {
-		r.logf("hop: no contact through the hopper: %v", err)
-		return false, nil
-	}
-	r.res.HopConnected = true
-	return true, nil
-}
+func (l *link) String() string { return fmt.Sprintf("%016x at %v", l.peerID, l.remote) }

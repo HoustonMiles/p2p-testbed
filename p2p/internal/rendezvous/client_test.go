@@ -33,3 +33,19 @@ func TestClientIntroduction(t *testing.T) {
 		}
 	}
 }
+
+func TestClientDeparture(t *testing.T) {
+	server := netip.MustParseAddrPort("203.0.113.101:7000")
+	c := &Client{Server: server, Room: 1, ID: 10}
+	left := wire.Packet{Type: wire.PeerLeft, Room: 1, Body: wire.U64(11)}
+	if id, ok := c.Departure(server, left); !ok || id != 11 {
+		t.Fatalf("got %d, %v", id, ok)
+	}
+	if _, ok := c.Departure(netip.MustParseAddrPort("203.0.113.66:7000"), left); ok {
+		t.Error("accepted a PeerLeft from someone else")
+	}
+	if _, ok := c.Departure(server, wire.Packet{Type: wire.PeerLeft, Room: 1}); ok {
+		t.Error("accepted a PeerLeft without an ID")
+	}
+}
+

@@ -45,6 +45,9 @@ a WAN host), and `command`, which runs `cmd_a`/`cmd_b` on the peers. Each comman
 prints one JSON object on its last line, and its keys become result columns
 (prefixed `a_`/`b_`). This is how the experiments run `punch`; the trial
 seed is passed as its `-room`, so both peers of a trial find each other.
+`punch` prints one line per link, so with the testbed's two peers the last
+line is the only one; rooms of more peers need the N-peer testbed (mesh
+step 4).
 
 **How trials are run:**
 - Each configuration's trials are split into blocks (`block_size`), and the
@@ -123,7 +126,8 @@ docker compose exec peer-b punch -name b -room 42 -direct -hop-interval 1s
 ```
 
 Use a new `-room` number for each try. `-name` labels the logs and results
-and names the default key file. `punch -h` lists every flag; the direct
+and names the default key file. With more members, give each the room size,
+e.g. `-peers 3`; each prints one row per link. `punch -h` lists every flag; the direct
 channel's are in [design.md](design.md#flags).
 
 ## Analysis notebook

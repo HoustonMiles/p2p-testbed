@@ -3,9 +3,10 @@ package peer
 import (
 	"errors"
 	"fmt"
+	"time"
+
 	"p2ptestbed/p2p/internal/rendezvous"
 	"p2ptestbed/p2p/internal/stun"
-	"time"
 )
 
 func (r *runner) doSTUN() error {
@@ -34,7 +35,7 @@ func (r *runner) onSTUN(m inbound) {
 }
 
 // rendezvousClient joins our room with our static key in direct mode, so
-// the rendezvous can pass it to the peer.
+// the rendezvous can pass it to the other members.
 func (r *runner) rendezvousClient() (*rendezvous.Client, error) {
 	server, err := resolve(r.cfg.Rendezvous)
 	if err != nil {
@@ -47,33 +48,69 @@ func (r *runner) rendezvousClient() (*rendezvous.Client, error) {
 	return c, nil
 }
 
-// meetAtRendezvous registers until a member is introduced.
+// meetAtRendezvous registers until the room's other members are all
+// introduced. Fewer after the timeout is not fatal: the run goes on with
+// the members it met, and every link has the same members to test.
+//
+// TODO(paper §5, mesh): members that join after the meeting are ignored;
+// a long-running peer would link with them as they come.
 func (r *runner) meetAtRendezvous() error {
-	register := r.rdv.Register()
-	ok := r.pump(r.cfg.RendezvousTimeout, 100*time.Millisecond,
+	register, want := r.rdv.Register(), r.cfg.Peers-1
+	r.pump(r.cfg.RendezvousTimeout, 100*time.Millisecond,
 		func() { r.conn.WriteToUDPAddrPort(register, r.rdv.Server) },
-		func() bool { return r.peerInfo })
-	if !ok {
+		func() bool { return len(r.links) >= want })
+	r.met = true
+	r.res.Members = len(r.links) + 1
+	switch n := len(r.links); {
+	case n == 0:
 		return errors.New("no introduction from the rendezvous server (is another member of the room running?)")
+	case n < want:
+		r.logf("rendezvous: met %d of the %d other members within %v; going on without the rest", n, want, r.cfg.RendezvousTimeout)
 	}
 	return nil
 }
 
-// onPeerInfo links with the first member introduced; later ones are
-// ignored until the link manager (mesh step 3).
+// keepRegistered refreshes our registration until the run ends, so the
+// rendezvous does not tell the other members we left.
+func (r *runner) keepRegistered() {
+	t := time.NewTicker(r.cfg.RefreshInterval)
+	defer t.Stop()
+	register := r.rdv.Register()
+	for {
+		select {
+		case <-r.stop:
+			return
+		case <-t.C:
+			r.conn.WriteToUDPAddrPort(register, r.rdv.Server)
+		}
+	}
+}
+
+// onPeerInfo adds a link for each member introduced during the meeting.
 func (r *runner) onPeerInfo(m inbound) {
 	in, ok := r.rdv.Introduction(m.from, m.pkt)
-	if !ok || r.peerInfo {
+	if !ok || r.met || r.links[in.PeerID] != nil {
 		return
 	}
-	r.peerInfo, r.peerRdv, r.remote = true, in.Peer, in.Peer
-	r.peerID.Store(in.PeerID)
-	r.rdvKey = append([]byte(nil), in.PeerKey...)
-	r.res.PeerID = ptr(idString(in.PeerID))
-	r.res.RdvAddr, r.res.PeerRdvAddr = ptr(in.Self.String()), ptr(in.Peer.String())
-	r.res.RendezvousMs = ptr(ms(m.at))
-	if r.stunGot.IsValid() {
-		r.res.MappingVaries = ptr(r.stunGot != in.Self)
+	if r.res.RdvAddr == nil {
+		r.res.RdvAddr = ptr(in.Self.String())
+		if r.stunGot.IsValid() {
+			r.res.MappingVaries = ptr(r.stunGot != in.Self)
+		}
 	}
-	r.logf("rendezvous: we are %v, peer %016x is %v", in.Self, in.PeerID, in.Peer)
+	l := newLink(r, in, m.at)
+	r.linksMu.Lock()
+	r.links[in.PeerID] = l
+	r.linksMu.Unlock()
+	r.logf("rendezvous: we are %v, member %016x is %v", in.Self, in.PeerID, in.Peer)
+}
+
+// onPeerLeft marks a member gone; links still waiting on it then fail at
+// their next barrier instead of timing out. Finished links keep their result.
+func (r *runner) onPeerLeft(m inbound) {
+	id, ok := r.rdv.Departure(m.from, m.pkt)
+	if l := r.links[id]; ok && l != nil && !l.left {
+		l.left = true
+		l.logf("rendezvous: the member left the room")
+	}
 }
