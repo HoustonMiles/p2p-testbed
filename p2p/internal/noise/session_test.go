@@ -49,3 +49,24 @@ func TestTamperAndReorder(t *testing.T) {
 		}
 	}
 }
+
+// A packet names its receiver's index, the two sides have different ones,
+// and the index is authenticated, so it cannot be rewritten to reach
+// another session.
+func TestReceiverIndex(t *testing.T) {
+	a, b := handshake(t)
+	if a.LocalIndex() == b.LocalIndex() {
+		t.Fatal("both sides have the same index")
+	}
+	pkt, _ := a.Seal(nil, typeData, []byte("hi"))
+	if idx, ok := ReceiverIndex(pkt); !ok || idx != b.LocalIndex() {
+		t.Fatalf("index %x, want the receiver's %x", idx, b.LocalIndex())
+	}
+	pkt[indexOffset] ^= 1
+	if _, _, err := b.Open(nil, pkt); err != ErrAuth {
+		t.Fatalf("rewritten index: %v", err)
+	}
+	if _, ok := ReceiverIndex(pkt[:Overhead-1]); ok {
+		t.Fatal("index read from a short packet")
+	}
+}

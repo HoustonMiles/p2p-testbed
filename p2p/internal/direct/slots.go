@@ -90,9 +90,9 @@ func (h *Hopper) closeUnusedSockets() {
 			used[st.sock.port] = true
 		}
 	}
-	for port, sk := range h.socks {
+	for port := range h.socks {
 		if !used[port] {
-			sk.conn.Close() // its reader sees the error and exits
+			h.ports.release(port)
 			delete(h.socks, port)
 		}
 	}

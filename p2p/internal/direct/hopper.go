@@ -50,8 +50,15 @@ type Hopper struct {
 	cfg            Config
 	side, peerSide byte // from the handshake; see Schedule.Port
 
+	ports    *Ports
+	ownPorts bool // Ports made for this hopper alone, closed with it
+
+	// live is held for reading while a packet is handled, so Close can
+	// wait until no OnPacket call is in flight.
+	live sync.RWMutex
+
 	mu    sync.Mutex
-	socks map[uint16]*hopSocket // by local port; consecutive slots may share one
+	socks map[uint16]*hopSocket // our view of the pool's sockets, by local port; consecutive slots may share one
 	slots map[uint64]*slotState // slots in their open window
 	last  uint64                // last slot logged as current
 	first uint64                // the slot running at start; never counted as a hop
@@ -71,6 +78,7 @@ type Inbound struct {
 	At      time.Time // real, not skewed, receive time
 }
 
+// hopSocket is what this hopper knows about one shared socket.
 type hopSocket struct {
 	conn  *net.UDPConn
 	port  uint16
@@ -102,12 +110,19 @@ func NewHopper(cfg Config) (*Hopper, error) {
 	}
 	h := &Hopper{
 		cfg:   cfg,
+		ports: cfg.Ports,
 		socks: map[uint16]*hopSocket{},
 		slots: map[uint64]*slotState{},
 		done:  make(chan struct{}),
 		first: cfg.Schedule.SlotAt(cfg.Schedule.Now()),
 	}
+	if h.ports == nil {
+		h.ports, h.ownPorts = NewPorts(cfg.LocalIP), true
+	}
 	h.side, h.peerSide = sides(cfg.Session.Initiator())
+	if err := h.ports.add(h); err != nil {
+		return nil, err
+	}
 	h.step()
 	h.wg.Add(1)
 	go h.loop()
@@ -156,18 +171,25 @@ func (h *Hopper) Current() (slot uint64, local, peer uint16) {
 	return slot, s.Port(h.side, slot), s.Port(h.peerSide, slot)
 }
 
-// Close stops hopping and closes every socket. Slots still open are not
-// counted as hops: their window never ended.
+// Close stops hopping and gives back every socket. When it returns, no
+// OnPacket call is running or will start. Slots still open are not counted
+// as hops: their window never ended.
 func (h *Hopper) Close() error {
 	h.once.Do(func() {
 		close(h.done)
+		h.ports.remove(h)
+		h.live.Lock() // waits out packets being handled; later ones see done
+		h.live.Unlock()
 		h.mu.Lock()
-		for port, sk := range h.socks {
-			sk.conn.Close()
+		for port := range h.socks {
+			h.ports.release(port)
 			delete(h.socks, port)
 		}
 		h.mu.Unlock()
 		h.wg.Wait()
+		if h.ownPorts {
+			h.ports.Close()
+		}
 	})
 	return nil
 }
@@ -190,29 +212,21 @@ func (h *Hopper) openSlot(slot uint64) *slotState {
 	return st
 }
 
-// socket returns the open socket for port, binding it if needed. nil means
-// the port is taken and the slot is lost for inbound traffic. Called with
-// h.mu held.
+// socket returns our socket for port, taking it from the pool if needed.
+// nil means the port is taken by another program and the slot is lost for
+// inbound traffic. Called with h.mu held.
 func (h *Hopper) socket(port uint16) *hopSocket {
 	if sk, ok := h.socks[port]; ok {
 		return sk
 	}
-	var ip net.IP
-	if h.cfg.LocalIP.IsValid() {
-		ip = h.cfg.LocalIP.AsSlice()
-	}
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ip, Port: int(port)})
+	conn, err := h.ports.acquire(port)
 	if err != nil {
 		h.stats.bindFailed.Add(1)
 		h.logf("hop: cannot bind port %d: %v", port, err)
 		return nil
 	}
-	conn.SetReadBuffer(4 << 20)
-	conn.SetWriteBuffer(4 << 20)
 	sk := &hopSocket{conn: conn, port: port}
 	h.socks[port] = sk
-	h.wg.Add(1)
-	go h.readLoop(sk)
 	return sk
 }
 

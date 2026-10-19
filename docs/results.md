@@ -20,6 +20,7 @@
 | Clock offset/drift flags | done | `punch -clock-offset`, `-clock-drift-ppm` |
 | Mesh step 1: the lower static key starts the handshake; the direct channel has no a/b roles | done, tests pass | `p2p/internal/peer/handshake.go` (`initiates`), `p2p/internal/direct/schedule.go` (sides) |
 | Mesh step 2: rendezvous rooms (any number of members, joins and leaves), peer IDs on the wire, trusted key directories | done, tests pass | `p2p/internal/rendezvous/`, `p2p/internal/wire/`, `punch -name -room`, `-peer-key DIR` |
+| Mesh step 3a: receiver index in the Noise header; one shared pool of hop sockets per peer, so two links on the same port share a socket | done, tests pass | `p2p/internal/noise/session.go`, `p2p/internal/direct/ports.go` |
 | Result reports (standard library only) | done | `p2prunner hops`, `p2prunner compare` (`p2prunner/reports.py`) |
 | Tests: Go unit + fuzz tests beside the code, Python `unittest` in `tests/` | done | [testing.md](testing.md) |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
@@ -33,11 +34,11 @@
 
 | Part | What it is for |
 |---|---|
-| Full mesh, steps 3-5: a link manager with one handshake and hopper per neighbor, sharing sockets when two links pick the same port; an N-peer testbed with per-link results; a mesh experiment (time to full mesh, hop success per link as N grows, port clashes) | The paper's system is a mesh of pairwise direct links |
+| Full mesh, steps 3b-5: a link manager with one handshake and hopper per neighbor, on the shared sockets; an N-peer testbed with per-link results; a mesh experiment (time to full mesh, hop success per link as N grows, port clashes) | The paper's system is a mesh of pairwise direct links |
 | Relay baseline: coturn as a TURN relay in the testbed (203.0.113.102), `punch -relay`, `relay_path` experiment | The comparison baseline, and the path for pairings that cannot hop |
 | Handoff Manager | Falls back to the relay when `hop_possible` is false or hopping stops holding |
 | Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |
-| Experiment C | Attack resilience, direct hopping vs relay (`hop_drain_cutoffs`, `hop_foreign`, `hop_auth_failed` are there for it) |
+| Experiment C | Attack resilience, direct hopping vs relay (`hop_drain_cutoffs`, `hop_unrouted`, `hop_foreign`, `hop_auth_failed` are there for it) |
 | Clock experiment files | Sweep `-clock-offset` / `-clock-drift-ppm` against the hop tolerance (min of `-hop-lead` and `-hop-min-overlap`); the runner cannot vary command parameters yet, so one file per value or a runner change |
 | Rerun `direct_path` | Only to record the new `hop_drain_cutoffs` column (expected 0); the numbers below are already final |
 
@@ -88,7 +89,9 @@ Medians of 10 trials, both sides. Compared with `p2prunner compare`.
 
 - No latency cost: RTT p50, p95 and jitter unchanged within 0.25 ms.
 - The link is fully used (`rx_ip_mbit` unchanged). Goodput is 2.0% lower:
-  each packet carries 25 more bytes (1228 -> 1253 on the wire).
+  each packet carries 25 more bytes (1228 -> 1253 on the wire). Since mesh
+  step 3a the header also carries a 4-byte receiver index, so a rerun would
+  show 29 bytes and about 2.3% (predicted, not yet measured).
 - The extra loss is the same overhead, not hopping: the sender offers the
   same packets per second, 2% fewer fit through the cap, so
   1 - (1 - raw loss) x 0.980 predicts 0.160 / 0.170 / 0.182, measured

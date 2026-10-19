@@ -41,6 +41,10 @@ type Stats struct {
 	// never count, since they fail authentication.
 	DrainMsAvg   float64 `json:"hop_drain_ms_avg"`
 	DrainCutoffs uint64  `json:"hop_drain_cutoffs"`
+
+	// Unrouted is peer-wide, the same for every link of a peer: packets on
+	// its hop ports that named none of its sessions (see Ports.Unrouted).
+	Unrouted uint64 `json:"hop_unrouted"`
 }
 
 // counters mirrors Stats with atomics; readers update it concurrently.
@@ -69,6 +73,7 @@ func (h *Hopper) Stats() Stats {
 		st.DrainMsAvg = ms(h.drain.total) / float64(h.drain.count)
 	}
 	st.DrainCutoffs = h.drain.cutoffs
+	st.Unrouted = h.ports.Unrouted()
 	return st
 }
 

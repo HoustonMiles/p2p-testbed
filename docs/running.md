@@ -81,8 +81,8 @@ Each run goes to `results/<experiment>/<start time>/`:
   (10 / 70 / 150 ms), not the half measured in the path baseline.
 - Compare throughput with the cap using `rx_ip_mbit`. netem also counts the
   14-byte Ethernet header, so with 1200-byte payloads the maximum is about
-  98.9% of the cap. In direct mode it also counts the 25 bytes Noise adds
-  per packet.
+  98.9% of the cap. In direct mode it also counts the 29 bytes Noise adds
+  per packet (25 before mesh step 3a, which added the receiver index).
 
 Expected punch success (cone and symmetric NATs, RFC 4787 behaviour): any
 pairing with a full cone side connects; symmetric with address-restricted

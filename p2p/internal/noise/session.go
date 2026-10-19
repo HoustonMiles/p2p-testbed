@@ -14,23 +14,36 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// Transport packet: type (1) | counter (u64, big-endian) | ciphertext + tag.
-// The counter is sent explicitly, as in WireGuard, because Noise's implicit
-// nonces fall out of step after the first lost or reordered datagram.
+// Transport packet (big-endian):
+//
+//	type (1) | receiver index (u32) | counter (u64) | ciphertext + tag
+//
+// The receiver index names the session the packet is for, as in WireGuard,
+// so one socket can serve several sessions (links of a mesh whose
+// schedules pick the same port). The counter is sent explicitly because
+// Noise's implicit nonces fall out of step after the first lost or
+// reordered datagram. The whole header is authenticated.
+//
+// TODO(paper §5 Threat Model, attacker position): the index stays the same
+// for the whole session, so an on-path observer can follow one link across
+// hops by it (as it already can by the addresses). Rotate it with the hop
+// key if Experiment C shows that matters.
 const (
-	headerLen = 9
-	tagLen    = 16
-	Overhead  = headerLen + tagLen
+	indexOffset   = 1
+	counterOffset = 5
+	headerLen     = 13
+	tagLen        = 16
+	Overhead      = headerLen + tagLen
 )
 
 // Noise reserves nonce 2^64-1; packets never use it, the hop key does.
 const maxCounter = math.MaxUint64 - 1
 
 var (
-	ErrShort     = errors.New("direct: packet too short")
-	ErrAuth      = errors.New("direct: authentication failed")
-	ErrReplay    = errors.New("direct: replayed or too old")
-	ErrExhausted = errors.New("direct: nonce space exhausted")
+	ErrShort     = errors.New("noise: packet too short")
+	ErrAuth      = errors.New("noise: authentication failed")
+	ErrReplay    = errors.New("noise: replayed or too old")
+	ErrExhausted = errors.New("noise: nonce space exhausted")
 )
 
 // Session seals and opens transport packets; safe for concurrent use.
@@ -44,8 +57,9 @@ type Session struct {
 	mu     sync.Mutex
 	replay replayWindow
 
-	hopKey    []byte
-	initiator bool
+	hopKey                []byte
+	initiator             bool
+	localIndex, peerIndex uint32
 }
 
 // newSession takes the handshake's cipher states: cs1 encrypts
@@ -58,7 +72,32 @@ func newSession(cs1, cs2 *flynn.CipherState, initiator bool) (*Session, error) {
 	}
 	key, err := deriveHopKey(i2r)
 	s.hopKey = key
+	s.localIndex, s.peerIndex = sessionIndex(key, initiator), sessionIndex(key, !initiator)
 	return s, err
+}
+
+// sessionIndex derives a side's receiver index from the hop key, so the
+// peers agree on both indexes without sending them.
+func sessionIndex(hopKey []byte, initiator bool) uint32 {
+	info := []byte("receiver index r")
+	if initiator {
+		info[len(info)-1] = 'i'
+	}
+	var out [4]byte
+	io.ReadFull(hkdf.Expand(sha256.New, hopKey, info), out[:])
+	return binary.BigEndian.Uint32(out[:])
+}
+
+// LocalIndex is the receiver index on packets sent to us.
+func (s *Session) LocalIndex() uint32 { return s.localIndex }
+
+// ReceiverIndex reads the receiver index of a transport packet, before any
+// crypto, to find its session.
+func ReceiverIndex(pkt []byte) (uint32, bool) {
+	if len(pkt) < Overhead {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(pkt[indexOffset:counterOffset]), true
 }
 
 // deriveHopKey encrypts zeros under the reserved nonce (as Noise's REKEY
@@ -87,6 +126,7 @@ func (s *Session) Seal(dst []byte, typ byte, payload []byte) ([]byte, error) {
 	}
 	start := len(dst)
 	dst = append(dst, typ)
+	dst = binary.BigEndian.AppendUint32(dst, s.peerIndex)
 	dst = binary.BigEndian.AppendUint64(dst, n)
 	return s.send.Encrypt(dst, n, dst[start:start+headerLen], payload), nil
 }
@@ -99,7 +139,7 @@ func (s *Session) Open(dst, pkt []byte) (typ byte, payload []byte, err error) {
 	if len(pkt) < Overhead {
 		return 0, nil, ErrShort
 	}
-	n := binary.BigEndian.Uint64(pkt[1:headerLen])
+	n := binary.BigEndian.Uint64(pkt[counterOffset:headerLen])
 	if n > maxCounter {
 		return 0, nil, ErrAuth
 	}

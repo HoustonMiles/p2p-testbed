@@ -8,31 +8,28 @@ import (
 	"time"
 )
 
-// readLoop runs for each open socket until it is closed. The checks run
-// cheapest first, which is the DoS defence: source IP, then the replay
-// window, then decryption.
+// receive handles one datagram that the Ports routed here by its receiver
+// index. The checks run cheapest first, which is the DoS defence: receiver
+// index (in Ports), source IP, then the replay window, then decryption.
 //
 // TODO(paper §5 Measures #5, countermeasures "per-packet authentication
-// tags"): junk from the peer's own IP still costs a full AEAD check. Add a
-// cheap per-slot tag that is checked before decrypting.
-func (h *Hopper) readLoop(sk *hopSocket) {
-	defer h.wg.Done()
-	buf := make([]byte, 65536)
-	plain := make([]byte, 0, 65536)
-	for {
-		n, from, err := sk.conn.ReadFromUDPAddrPort(buf)
-		if err != nil {
-			return // closed by step or Close
-		}
-		in := Inbound{From: netip.AddrPortFrom(from.Addr().Unmap(), from.Port()), Port: sk.port, At: time.Now()}
-		typ, payload, ok := h.open(in.From, buf[:n], plain[:0])
-		if !ok {
-			continue
-		}
-		in.Payload = payload
-		h.markArrival(sk, typ)
-		h.dispatch(sk, typ, in)
+// tags"): junk from the peer's own IP with a valid index still costs a full
+// AEAD check. Add a cheap per-slot tag that is checked before decrypting.
+func (h *Hopper) receive(port uint16, from netip.AddrPort, pkt, plain []byte) {
+	h.live.RLock()
+	defer h.live.RUnlock()
+	h.mu.Lock()
+	sk := h.socks[port]
+	h.mu.Unlock()
+	if sk == nil || h.closed() {
+		return // given back meanwhile
 	}
+	typ, payload, ok := h.open(from, pkt, plain)
+	if !ok {
+		return
+	}
+	h.markArrival(sk, typ)
+	h.dispatch(sk, typ, Inbound{Payload: payload, From: from, Port: port, At: time.Now()})
 }
 
 // open filters and decrypts one datagram, counting what it drops.

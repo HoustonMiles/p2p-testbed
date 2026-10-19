@@ -12,7 +12,7 @@
 # Expected:
 #   rtt_ms_*     the same as punch_path, within noise (crypto adds microseconds)
 #   rx_mbit      a little lower than punch_path: every packet now carries
-#                25 more bytes (Noise header and tag) through the same cap.
+#                29 more bytes (Noise header and tag) through the same cap.
 #                rx_ip_mbit counts them, so it should still be just under 50.
 #   rx_loss      the extra loss hopping causes, if any, beyond punch_path's
 #   hop_hops_missed  0

@@ -62,7 +62,13 @@ channel:
   so lost or repeated handshake packets are harmless.
 - `noise/session.go`, `noise/replay.go`: the UDP transport, with explicit
   nonces and a 2048-packet replay window. The hop key is derived from the
-  session keys.
+  session keys. Each packet starts with a 13-byte header (type, the
+  receiver's 4-byte session index, the 8-byte counter) and ends with a
+  16-byte tag: 29 bytes per packet.
+- `direct/ports.go`: one peer's hop sockets, shared by all its links. When
+  two links' schedules pick the same port in the same slot they use one
+  socket, and each packet goes to the link its receiver index names; packets
+  naming no link are dropped before any crypto (`hop_unrouted`).
 - `direct/schedule.go`: time is cut into slots of `-hop-interval`; each
   side's port for each slot is HKDF(hop key, side, slot), from the range
   10000-32767 (below Linux's ephemeral ports), where side is initiator or
@@ -143,7 +149,8 @@ and the hopper's counters, all prefixed `hop_`:
 | `hop_hops_ok`, `hop_hops_missed` | slots on which something from the peer arrived on our port (the slot running at start is not counted) |
 | `hop_sent`, `hop_received`, `hop_send_errors` | Data packets |
 | `hop_probes_sent`, `hop_probes_recv` | pinhole probes |
-| `hop_foreign`, `hop_auth_failed`, `hop_replayed` | dropped on arrival: wrong source IP (before any crypto), failed authentication, replay |
+| `hop_unrouted` | dropped on arrival, peer-wide (the same in every link's row): the receiver index named none of this peer's links, including packets too short to have one |
+| `hop_foreign`, `hop_auth_failed`, `hop_replayed` | dropped on arrival by the link: wrong source IP (before any crypto), failed authentication, replay |
 | `hop_bind_failed` | our port for a slot was taken |
 | `hop_drain_ms_avg` | how long old ports stayed open after the boundary (mixes busy and idle hops) |
 | `hop_drain_cutoffs` | old ports closed at `-hop-overlap` while Data was still arriving: the hops that can lose packets. Should be 0. |
