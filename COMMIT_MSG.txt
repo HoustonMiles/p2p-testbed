@@ -1,38 +1,33 @@
-Mesh step 4b-2: mesh trials, the worst case (everyone at once)
+Mesh step 4c: peers join a running mesh (the best case)
 
-The runner can now run and record whole meshes, as it did pairs.
+Until now a peer waited at the rendezvous until every member was there,
+and only then started its links, so however far apart peers started,
+they all punched together. Now a mesh can grow while members arrive.
 
-- mesh trial type (p2prunner/mesh.py): punch on every peer of the
-  configuration at the same moment, in one room (the trial seed), with the
-  flags in [params] args. In direct mode, peers without a key in ./keys get
-  one first. Testbed.parallel(all_at_once=True) lifts the 32-at-once cap,
-  since a mesh needs every peer running together.
-- Trial row: pairs, pairs_usable, pairs_hop / _punch / _none / _error,
-  pairs_as_predicted, time_to_usable_ms and time_to_full_mesh_ms (from the
-  first peer's start until the last usable pair was ready at both ends).
-- links.jsonl: one row per link end, punch's columns plus peer, member,
-  the pair's outcome and predicted outcome, and each end's expected NAT
-  behaviour. Written before the trial's own line; --resume drops the links
-  of a trial that was interrupted in between.
-- p2prunner/nat.py: the NAT expectations (moved from trials.py) and the
-  RFC 4787 prediction for a pair: punch fails when one side's mapping is
-  port-dependent and the other filters by port; hopping also needs both
-  mappings endpoint-independent.
-- punch: new column start_unix_ms, which puts every member's *_ms columns
-  on one timeline.
-- p2prunner mesh RUN: per configuration, ok, pairs usable, share as
-  predicted, share of full meshes, time until ready.
-- experiments/mesh_scale.toml: 2, 4, 8 and 16 peers, realistic (all
-  port-restricted) and mixed NATs, coast profile.
-- The trial registry moved to cli.py; trials.fill() is shared by the
-  command and mesh trials.
+- peer: each link starts the moment the rendezvous introduces its member
+  (onPeerInfo), up to the room's size. Members that arrive later link
+  with those already running, and those link with them. Throughput
+  tests still wait until the room is complete. Once it is full, or after
+  -rendezvous-timeout, later members are ignored, as before.
+- mesh trial: stagger_ms spaces the starts (a first, then b, c, ... each
+  stagger_ms later); 0, the default, is the all-at-once worst case. The
+  peers wait at the rendezvous as long as the spacing needs.
+  New columns join_ms_p50 / join_ms_max: from a peer's start until its
+  usable links with the members already running were ready at both ends.
+- Experiments: a key of [params] may be a matrix key, so each
+  configuration runs its trials with its own value (a result column, not
+  a testbed setting). Configurations without one keep their IDs (all 120
+  unchanged).
+- p2prunner mesh: new column join_p50_ms; configurations in the
+  experiment's order.
+- experiments/mesh_join.toml: 8 and 16 peers, 0 / 100 / 500 / 2000 ms
+  apart, realistic and mixed NATs, coast profile.
 
-Sandbox run (no netem, 2 runs per configuration): all 1,240 link ends did
-as RFC 4787 predicts; realistic meshes completed at every size, time to
-full mesh about 0.2 / 0.6 / 1.3 s at 4 / 8 / 16 peers; mixed meshes came up
-exactly as far as the NATs allow (66 of 120 pairs at 16 peers).
+Sandbox run (no netem, 2 runs per configuration): every pair did as
+RFC 4787 predicts at every spacing; realistic meshes complete. Median
+join time at 16 peers: 317 ms all at once, 187 ms 100 ms apart, 169 ms
+at 500 ms or more; at 8 peers about 160 ms at any spacing.
 
-Tests: the prediction against the measured pair results (punch_matrix,
-Experiment A), the mesh trial on fake peers (one room, all at once, keys,
-outcomes, columns, link rows), links.jsonl and its resume clean-up, the
-mesh report. All 120 existing config IDs unchanged.
+Tests: a member joining 1.5 s late, with the first two linked before it
+comes (mutation-checked against waiting for the full room); spaced
+commands and join times; [params] keys in the matrix.

@@ -61,9 +61,12 @@ a cycle, and no two tests share a peer's link capacity (a "ready" barrier
 starts each pair's test). Pairs with no member in common may test at the
 same time. While running, each member re-registers every second, so the
 rendezvous never expires it; if a member does leave, links still waiting on
-it fail at once ("left the room") instead of timing out. Members that come
-after the meeting are ignored; with fewer than N-1 after
-`-rendezvous-timeout`, the run goes on with those it met (`members`).
+it fail at once ("left the room") instead of timing out. Each link starts
+the moment the rendezvous introduces its member, so members may arrive at
+different times and the mesh grows while they come; throughput tests wait
+until the room is complete. Once it is full, or after `-rendezvous-timeout`
+with fewer than N-1, later members are ignored and the run goes on with
+those it met (`members`).
 
 Two waits still span links. A peer starts its throughput tests only once
 all its links are done pinging, so no ping is measured under a test's load.

@@ -140,34 +140,41 @@ def pooled_row(metrics: list, changes: dict[str, list[float]]) -> list[str]:
 # =============================================================================
 # mesh
 # =============================================================================
-MESH_HEADER = ["config", "n", "ok", "pairs", "usable", "as_predicted", "full", "ready_p50_ms", "ready_max_ms", "!"]
+MESH_HEADER = ["config", "n", "ok", "pairs", "usable", "as_predicted", "full", "ready_p50_ms", "ready_max_ms",
+               "join_p50_ms", "!"]
 
 
 def mesh(paths: list[str]) -> int:
     """Per configuration: the share of trials that ran cleanly (ok), pairs
     per mesh and the median that came up usable, the share of all pairs
     whose outcome RFC 4787 predicts (as_predicted), the share of trials that
-    formed a full mesh, and how long the usable pairs took to be ready
-    (time_to_usable_ms, from the first peer's start). "!" marks a
-    configuration where some pair did not do as predicted."""
-    groups = by_config(load_runs(paths))
-    table = [mesh_row(trials) for trials in groups.values()]
-    table.sort(key=lambda r: (int(r[3]) if r[3].isdigit() else 0, r[0]))
-    print_table(MESH_HEADER, table)
+    formed a full mesh, how long the usable pairs took to be ready
+    (time_to_usable_ms, from the first peer's start), and the median time
+    a peer took to join the members already running (join_ms_p50). "!"
+    marks a configuration where some pair did not do as predicted.
+    Configurations come in the experiment's order."""
+    groups = sorted(by_config(load_runs(paths)).values(), key=lambda trials: trials[0]["config_id"])
+    print_table(MESH_HEADER, [mesh_row(trials) for trials in groups])
     return 0
 
 
 def mesh_row(trials: list[dict]) -> list[str]:
     pairs = sum(r.get("pairs", 0) for r in trials)
     predicted = sum(r.get("pairs_as_predicted", 0) for r in trials)
-    ready = sorted(v for r in trials if (v := number(r, "time_to_usable_ms")) is not None)
+    ready = sorted(column(trials, "time_to_usable_ms"))
     return [
         trials[0].get("config_label", trials[0]["config_id"]), str(len(trials)),
         fmt(share([bool(r.get("ok")) for r in trials])),
         str(trials[0].get("pairs", "-")),
-        fmt(median([v for r in trials if (v := number(r, "pairs_usable")) is not None])),
+        fmt(median(column(trials, "pairs_usable"))),
         fmt(predicted / pairs if pairs else None),
         fmt(share([r.get("time_to_full_mesh_ms") is not None for r in trials])),
         fmt(median(ready)), fmt(ready[-1] if ready else None),
+        fmt(median(column(trials, "join_ms_p50"))),
         "!" if predicted != pairs else "",
     ]
+
+
+def column(trials: list[dict], name: str) -> list[float]:
+    """The numbers in one column of the trials, skipping the missing."""
+    return [v for r in trials if (v := number(r, name)) is not None]

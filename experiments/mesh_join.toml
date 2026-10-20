@@ -1,0 +1,47 @@
+# =============================================================================
+# Mesh join: how does the start pattern change how a mesh forms?
+#
+# Peers start stagger_ms apart (a first, then b, c, ...), each joining the
+# mesh the earlier ones are already running. 0 is the worst case: everyone
+# at once, as in mesh_scale. With enough spacing each join finishes before
+# the next begins, so each newcomer only brings up its own N-1 links: the
+# best case. The values between show where the load starts to matter.
+#
+# Per trial (trials.jsonl), besides mesh_scale's columns:
+#   join_ms_p50, join_ms_max   from a peer's start until its usable links
+#                              with the members already running were ready
+#                              at both ends (the first peer has none)
+# time_to_full_mesh_ms includes the spacing itself ((N-1) x stagger_ms), so
+# compare join times, not that, across stagger values.
+#
+#   uv run python -m p2prunner plan experiments/mesh_join.toml
+#   uv run python -m p2prunner run  experiments/mesh_join.toml
+#   uv run python -m p2prunner mesh results/mesh_join/<run>
+# =============================================================================
+
+name = "mesh_join"
+description = "Peers joining a running mesh at different spacings, from all at once to one at a time, 8 and 16 peers."
+trial = "mesh"
+runs = 5
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 120
+est_trial_s = 20
+stagger_ms = 0
+args = "-direct -hop-interval 1s -pings 20 -ping-interval 50ms -rate-mbit 0"
+
+[matrix]
+peers = [8, 16]
+stagger_ms = [0, 100, 500, 2000]
+net_profile = ["coast"]
+
+[[matrix.nat_mix]]
+name = "realistic"
+nats = ["port_restricted"]
+
+[[matrix.nat_mix]]
+name = "mixed"
+nats = ["full_cone", "restricted", "port_restricted", "symmetric"]

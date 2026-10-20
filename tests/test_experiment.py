@@ -6,6 +6,29 @@ from p2prunner import experiment
 from p2prunner.experiment import PEER_FACTORS, expand_matrix
 
 
+class TrialParamsTest(unittest.TestCase):
+    """A key of [params] in the matrix varies a trial setting per configuration."""
+
+    def setUp(self):
+        self.configs = expand_matrix({"stagger_ms": [0, 500], "net_profile": ["coast"]},
+                                     {"stagger_ms": 0, "args": "-direct"})
+
+    def test_each_configuration_carries_its_value(self):
+        self.assertEqual([c.params for c in self.configs], [{"stagger_ms": 0}, {"stagger_ms": 500}])
+        self.assertEqual([c.label for c in self.configs],
+                         ["stagger_ms=0, net_profile=coast", "stagger_ms=500, net_profile=coast"])
+        self.assertEqual(self.configs[1].row()["stagger_ms"], 500)
+
+    def test_not_a_testbed_setting(self):
+        self.assertNotIn("stagger_ms", self.configs[0].factors)
+        self.assertNotIn("STAGGER_MS", self.configs[0].env)
+        self.assertNotEqual(self.configs[0].id.split("-")[1], self.configs[1].id.split("-")[1])
+
+    def test_a_key_neither_testbed_nor_param_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "unknown setting 'stagger'"):
+            expand_matrix({"stagger": [0]}, {"stagger_ms": 0})
+
+
 class ExpandMatrixTest(unittest.TestCase):
     def test_every_combination(self):
         configs = expand_matrix({

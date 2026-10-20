@@ -90,7 +90,8 @@ class MeshTrialTest(unittest.TestCase):
 
     def test_every_peer_at_once_in_one_room(self):
         self.assertTrue(self.peers.at_once)
-        self.assertEqual(self.peers.commands["b"], "punch -name b -room 77 -peers 3 -quiet -direct -hop-interval 1s")
+        self.assertEqual(self.peers.commands["b"],
+                         "punch -name b -room 77 -peers 3 -quiet -rendezvous-timeout 15s -direct -hop-interval 1s")
 
     def test_keys_made_only_where_missing(self):
         self.assertEqual(self.peers.genkeys, [["punch", "-genkey", "/keys/c"]])
@@ -118,6 +119,28 @@ class FullMeshTest(unittest.TestCase):
         m = mesh(Peers(temp_dir(self), rows, keys=tuple("abc")), config(peers=3), {"args": "-direct"}, TrialContext(0, 1))
         self.assertEqual((m["pairs_usable"], m["pairs_as_predicted"], m["ok"]), (3, 3, True))
         self.assertEqual(m["time_to_full_mesh_ms"], 1500.0 + 200.0 - 1000.0)
+
+
+
+class StaggerTest(unittest.TestCase):
+    """Peers start stagger_ms apart, in name order, and wait long enough at
+    the rendezvous for the last; join times count only earlier members."""
+
+    def test_starts_are_spaced(self):
+        peers = Peers(temp_dir(self), {n: [] for n in "abc"})
+        mesh(peers, config(peers=3), {"args": "-pings 5", "stagger_ms": 500}, TrialContext(0, 9))
+        self.assertEqual(peers.commands["a"], "punch -name a -room 9 -peers 3 -quiet -rendezvous-timeout 16s -pings 5")
+        self.assertTrue(peers.commands["c"].startswith("sleep 1.000; punch -name c "))
+
+    def test_join_time_is_from_the_newcomer_s_start(self):
+        start = {"a": 1000.0, "b": 2000.0, "c": 3000.0}
+        rows = {n: [link(n, m, start_unix_ms=start[n], ready_ms=300.0 if n == "c" else 100.0)
+                    for m in "abc" if m != n] for n in "abc"}
+        m = mesh(Peers(temp_dir(self), rows, keys=tuple("abc")), config(peers=3), {"args": "-direct"},
+                 TrialContext(0, 1))
+        # b joins a: ready at 2100 (a's end at 1100); c joins both: ready at 3300.
+        self.assertEqual((m["join_ms_p50"], m["join_ms_max"]), (200.0, 300.0))
+        self.assertEqual(m["time_to_full_mesh_ms"], 2300.0)
 
 
 if __name__ == "__main__":

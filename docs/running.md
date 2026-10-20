@@ -41,6 +41,16 @@ bundle several settings under one name. Matrix keys (see
   peers = [2, 4, 8]
   nats = [["port_restricted", "full_cone", "symmetric"]]
   ```
+- any key of the experiment's `[params]`, which each configuration then
+  overrides for its trials (a column in the results, not a testbed
+  setting):
+
+  ```toml
+  [params]
+  stagger_ms = 0
+  [matrix]
+  stagger_ms = [0, 100, 500, 2000]
+  ```
 
 A peer gets a CGN only when the configuration puts it behind one, so large
 testbeds stay small. Configurations of two peers keep the IDs they had
@@ -57,6 +67,7 @@ before `peers` existed, so older results still match.
 | `direct_path` | Experiment B: `punch_path` through the direct channel, realistic pairing x 3 distances (~10 min) |
 | `direct_path_overlap` | `direct_path` with `-hop-overlap 400ms`, the test that found the overlap problem (~10 min) |
 | `mesh_scale` | Full mesh of direct links for 2, 4, 8 and 16 peers, all starting at once, realistic (all port-restricted) and mixed NATs (~30 min) |
+| `mesh_join` | Peers joining a running mesh 0, 100, 500 and 2000 ms apart, 8 and 16 peers, realistic and mixed NATs: worst case against best case (~35 min) |
 
 **Trial types:** `nat_verify` (RFC 5780 check), `ping` (RTT from both peers to
 a WAN host), and `command`, which runs `cmd_a`/`cmd_b` on the peers. Each command
@@ -66,16 +77,21 @@ seed is passed as its `-room`, so both peers of a trial find each other.
 `punch` prints one line per link, so with two peers the last line is the
 only one. The `command` trial runs on peers a and b only.
 
-The `mesh` trial runs `punch` on every peer of the configuration at the
-same moment, in one room (the trial seed), with the flags in `args`; in
-direct mode it first makes keys for peers that have none. Its trial row has
+The `mesh` trial runs `punch` on every peer of the configuration in one
+room (the trial seed), with the flags in `args`; in direct mode it first
+makes keys for peers that have none. With `stagger_ms`, peer a starts
+first, b `stagger_ms` later, and so on, each joining the mesh the earlier
+ones are running; 0 (the default) starts everyone at the same moment. Its trial row has
 mesh-level columns: `pairs` (N(N-1)/2), `pairs_usable` (hop-connected at
 both ends in direct mode, punched in raw mode), `pairs_hop`, `pairs_punch`,
 `pairs_none`, `pairs_error`, `pairs_as_predicted` (the outcome RFC 4787
 predicts for the pair's NAT behaviours, `p2prunner/nat.py`),
 `time_to_usable_ms` (from the first peer's start until the last usable
 pair was ready at both ends) and `time_to_full_mesh_ms` (the same, when
-every pair is usable). Each link end's own row goes to `links.jsonl`.
+every pair is usable; with `stagger_ms` it includes the spacing itself),
+and `join_ms_p50` / `join_ms_max` (from a peer's start until its usable
+links with the members already running were ready at both ends). Each link
+end's own row goes to `links.jsonl`.
 
 **How trials are run:**
 - Each configuration's trials are split into blocks (`block_size`), and the

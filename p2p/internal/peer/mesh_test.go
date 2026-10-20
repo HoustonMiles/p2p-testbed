@@ -174,6 +174,32 @@ func checkOneBadLink(t *testing.T, results map[string][]*Result, bad func(pair s
 	}
 }
 
+// A member that joins a running mesh: a and b link at once, without
+// waiting for c, which comes 1.5 s later; then c links with both.
+func TestLoopbackJoinRunningMesh(t *testing.T) {
+	s := startServers(t, Config{})
+	room := Config{Peers: 3}
+	a, b := startPeer(t, s.config(t, "a", 0, room)), startPeer(t, s.config(t, "b", 1, room))
+	time.Sleep(1500 * time.Millisecond)
+	c := startPeer(t, s.config(t, "c", 2, room))
+	results := map[string][]*Result{"a": <-a, "b": <-b, "c": <-c}
+	byID := map[string]string{}
+	for name, rows := range results {
+		byID[rows[0].ID] = name
+	}
+	for name, rows := range results {
+		if len(rows) != 2 {
+			t.Fatalf("%s: %d rows, want 2", name, len(rows))
+		}
+		for _, r := range rows {
+			pair := name + "->" + byID[r.PeerID]
+			if checkRow(t, pair, r); (pair == "a->b" || pair == "b->a") && r.ReadyMs != nil && *r.ReadyMs > 1000 {
+				t.Errorf("%s: ready at %.0f ms: waited for c", pair, *r.ReadyMs)
+			}
+		}
+	}
+}
+
 // A member that comes after the meeting is ignored: a and b, who met each
 // other, finish their run as a pair, and c, which waited for both, cannot
 // punch them.

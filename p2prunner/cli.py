@@ -292,7 +292,7 @@ def run_trial(run: Run, cfg, trial: int) -> dict:
     t0 = time.monotonic()
     try:
         run.tb.reset_state()
-        row.update(run.trial_fn(run.tb, cfg, run.exp.params, ctx))
+        row.update(run.trial_fn(run.tb, cfg, {**run.exp.params, **cfg.params}, ctx))
         row.setdefault("ok", True)
     except TestbedError as e:
         row.update(ok=False, error=str(e)[-300:], testbed_error=True)

@@ -1,12 +1,19 @@
 """
-The mesh trial: every peer of the configuration runs punch at the same
-moment, in one room, and links with every other peer (a full mesh). Everyone
-starting together is the heaviest load a mesh sees while it forms.
+The mesh trial: every peer of the configuration runs punch in one room and
+links with every other peer (a full mesh).
 
     trial = "mesh"
     [params]
     args = "-direct -hop-interval 1s -pings 20 -rate-mbit 0"   # punch flags for every peer
+    stagger_ms = 0                                            # default 0
     timeout_s = 120                                           # default 120
+
+stagger_ms spaces the starts: peer a starts first, b stagger_ms later, c
+after another stagger_ms, and so on, each joining the mesh the earlier ones
+are already running. 0 starts everyone at the same moment: the heaviest
+load a mesh sees while it forms. The peers wait for the last one at the
+rendezvous for as long as the spacing needs (-rendezvous-timeout, which
+args can override).
 
 $seed, $trial and $<param> in args are filled in as for the command trial;
 the trial seed is the room. In direct mode, peers without a key in ./keys
@@ -22,6 +29,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import statistics
 
 from p2prunner import nat
 from p2prunner.trials import fill
@@ -37,16 +45,24 @@ def mesh(tb, cfg, params, ctx) -> dict:
     if direct:
         ensure_keys(tb, names)
     timeout = float(params.get("timeout_s", 120))
-    jobs = {n: (lambda n=n: tb.sh(f"peer-{n}", punch_command(n, len(names), ctx.seed, args), timeout=timeout))
-            for n in names}
+    commands = peer_commands(names, ctx.seed, args, float(params.get("stagger_ms", 0)) / 1000)
+    jobs = {n: (lambda n=n, cmd=cmd, delay=delay: tb.sh(f"peer-{n}", cmd, timeout=timeout + delay))
+            for n, (cmd, delay) in commands.items()}
     rows = read_rows(tb.parallel(jobs, all_at_once=True), ctx.raw)
     pairs = pair_rows(names, rows)
     ctx.links.extend(link_rows(cfg, pairs, direct))
     return mesh_metrics(cfg, pairs, rows, direct)
 
 
-def punch_command(name: str, peers: int, room: int, args: str) -> str:
-    return f"punch -name {name} -room {room} -peers {peers} -quiet {args}"
+def peer_commands(names: list[str], room: int, args: str, stagger_s: float) -> dict[str, tuple[str, float]]:
+    """Each peer's shell command and how long it waits before starting."""
+    wait = 15 + stagger_s * (len(names) - 1)  # the first peer waits for the last at the rendezvous
+    commands = {}
+    for k, name in enumerate(names):
+        cmd = f"punch -name {name} -room {room} -peers {len(names)} -quiet -rendezvous-timeout {wait:g}s {args}"
+        delay = k * stagger_s
+        commands[name] = (f"sleep {delay:.3f}; {cmd}" if delay else cmd, delay)
+    return commands
 
 
 def ensure_keys(tb, names: list[str]) -> None:
@@ -122,6 +138,7 @@ def mesh_metrics(cfg, pairs: dict, rows: dict, direct: bool) -> dict:
         "members_min": min((r[0]["members"] for r in rows.values() if r), default=0),
         **pair_counts(cfg, outcomes, direct), "pairs_usable": len(usable),
         "time_to_usable_ms": ready_span(rows, [pairs[p] for p in usable]),
+        **join_times({p: pairs[p] for p in usable}),
     }
     metrics["time_to_full_mesh_ms"] = metrics["time_to_usable_ms"] if len(usable) == len(pairs) else None
     metrics["ok"] = len(reported) == len(rows) and metrics["pairs_error"] == 0
@@ -145,3 +162,18 @@ def ready_span(rows: dict, ends: list[tuple]) -> float | None:
     first = min(r[0]["start_unix_ms"] for r in rows.values() if r)
     last = max(e["start_unix_ms"] + e["ready_ms"] for pair in ends for e in pair)
     return round(last - first, 3)
+
+
+def join_times(usable: dict) -> dict:
+    """How long each peer took to join the members already running: from
+    its start until its usable pairs with the peers that started before it
+    were ready at both ends. The first peer to start has none."""
+    joins: dict[str, float] = {}
+    for (a, b), ends in usable.items():
+        start = {a: ends[0]["start_unix_ms"], b: ends[1]["start_unix_ms"]}
+        newer = max(start, key=start.get)
+        ready = max(e["start_unix_ms"] + e["ready_ms"] for e in ends)
+        joins[newer] = max(joins.get(newer, 0.0), ready - start[newer])
+    times = sorted(joins.values())
+    return {"join_ms_p50": round(statistics.median(times), 3) if times else None,
+            "join_ms_max": round(times[-1], 3) if times else None}

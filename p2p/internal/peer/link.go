@@ -157,9 +157,11 @@ func pairLess(a, b pair) bool { return a.lo < b.lo || a.lo == b.lo && a.hi < b.h
 // bound on how many tests the peer may run before it reaches ours.
 func (l *link) pairsAhead() int {
 	ids := []uint64{l.r.id}
+	l.r.linksMu.RLock()
 	for id := range l.r.links {
 		ids = append(ids, id)
 	}
+	l.r.linksMu.RUnlock()
 	ours, n := l.r.pair(l.peerID), 0
 	for i := range ids {
 		for j := range ids[:i] {

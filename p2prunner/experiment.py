@@ -37,6 +37,14 @@ that for one peer:
     [matrix]
     peers = [2, 4, 8]
     nats = [["port_restricted", "full_cone", "symmetric"]]
+
+A key of [params] may be a matrix key too: each configuration then runs its
+trials with its own value (the value in [params] is the default):
+
+    [params]
+    stagger_ms = 0
+    [matrix]
+    stagger_ms = [0, 100, 500]
 """
 
 from __future__ import annotations
@@ -122,6 +130,7 @@ class Config:
     factors: dict[str, str]        # every factor -> value, defaults filled in (see resolve)
     bundles: dict[str, str]        # bundle key -> bundle name, e.g. {"pairing": "realistic"}
     varied: tuple = ()             # plain (non-bundle) matrix keys, shown in the label
+    params: dict = field(default_factory=dict)  # [params] the matrix sets for this configuration
 
     @property
     def peers(self) -> list[topology.Peer]:
@@ -148,19 +157,21 @@ class Config:
     def id(self) -> str:
         """Short, stable ID: the same settings always give the same ID, so
         results from different runs can be matched up."""
-        digest = hashlib.sha1(json.dumps(self.factors, sort_keys=True).encode()).hexdigest()
+        settings = {**self.factors, "params": self.params} if self.params else self.factors
+        digest = hashlib.sha1(json.dumps(settings, sort_keys=True).encode()).hexdigest()
         return f"c{self.index:02d}-{digest[:6]}"
 
     @property
     def label(self) -> str:
         """Human-readable summary: bundle names plus every plain matrix setting."""
         parts = [f"{k}={v}" for k, v in self.bundles.items()]
-        parts += [f"{k}={self.factors.get(k, DEFAULT_PEERS if k == 'peers' else '')}" for k in self.varied]
+        values = {"peers": DEFAULT_PEERS, **self.factors, **self.params}
+        parts += [f"{k}={values.get(k, '')}" for k in self.varied]
         return ", ".join(parts) or "defaults"
 
     def row(self) -> dict:
         """Columns describing this configuration in every result row."""
-        return {"config_id": self.id, "config_label": self.label, **self.bundles, **self.factors}
+        return {"config_id": self.id, "config_label": self.label, **self.bundles, **self.factors, **self.params}
 
 
 @dataclass
@@ -201,19 +212,22 @@ def load(path: str | Path) -> Experiment:
         verify_nat=bool(data.get("verify_nat", True)),
         source_text=text,
     )
-    exp.configs = expand_matrix(data.get("matrix", {}))
+    exp.configs = expand_matrix(data.get("matrix", {}), exp.params)
     return exp
 
 
-def expand_matrix(matrix: dict) -> list[Config]:
+def expand_matrix(matrix: dict, params: dict | None = None) -> list[Config]:
     """Turn the [matrix] table into the list of all configurations.
 
     Each matrix key is either:
       - a list of plain values, e.g. net_profile = ["local", "coast"], or
       - a list of tables ("bundles"), each with a "name" and several settings.
+    A key may be a testbed setting or one of the experiment's [params],
+    which the configuration then overrides for its trials.
     The configurations are every combination (Cartesian product) of the keys.
     """
-    axes = [axis_options(key, values) for key, values in matrix.items()]
+    params = params or {}
+    axes = [axis_options(key, values, params) for key, values in matrix.items()]
     # Keys given as plain values appear in the label; bundles are named instead.
     varied = tuple(key for key, values in matrix.items() if any(not isinstance(v, dict) for v in values))
     configs = []
@@ -223,11 +237,18 @@ def expand_matrix(matrix: dict) -> list[Config]:
         for bundle_info, options in combo:
             bundles.update(bundle_info)
             settings.update(options)
-        configs.append(Config(index=i, factors=resolve(settings), bundles=bundles, varied=varied))
+        trial_params = {k: settings.pop(k) for k in list(settings) if is_param(k, params)}
+        configs.append(Config(index=i, factors=resolve(settings), bundles=bundles, varied=varied,
+                              params=trial_params))
     return configs
 
 
-def axis_options(key: str, values) -> list[tuple[dict, dict]]:
+def is_param(key: str, params: dict) -> bool:
+    """A matrix key that sets one of the experiment's [params], not the testbed."""
+    return key in params and key not in ("peers", "nats") and key not in GLOBAL_FACTORS and not peer_key(key)
+
+
+def axis_options(key: str, values, params: dict) -> list[tuple[dict, dict]]:
     """One matrix key's options, each as (bundle name if any, settings)."""
     if not isinstance(values, list) or not values:
         raise ValueError(f"matrix.{key} must be a non-empty list")
@@ -236,24 +257,27 @@ def axis_options(key: str, values) -> list[tuple[dict, dict]]:
         if isinstance(v, dict):
             v = dict(v)
             name = str(v.pop("name", f"{key}{len(options)}"))
-            _check_settings(v, where=f"matrix.{key}[{name}]")
+            _check_settings(v, f"matrix.{key}[{name}]", params)
             options.append(({key: name}, v))
         else:
-            _check_settings({key: v}, where=f"matrix.{key}")
+            _check_settings({key: v}, f"matrix.{key}", params)
             options.append(({}, {key: v}))
     return options
 
 
-def _check_settings(settings: dict, where: str) -> None:
+def _check_settings(settings: dict, where: str, params: dict) -> None:
     """Catch typos early, before an overnight run starts."""
     for key, value in settings.items():
+        if is_param(key, params):
+            continue
         if key == "peers":
             _check_peers(value, where)
         elif key == "nats":
             _check_nats(value, where)
         elif key not in GLOBAL_FACTORS and not peer_key(key):
             raise ValueError(f"{where}: unknown setting '{key}' (known: peers, nats, "
-                             f"{', '.join(GLOBAL_FACTORS)}, or {', '.join(p + '_<peer>' for p in PEER_FACTORS)})")
+                             f"{', '.join(GLOBAL_FACTORS)}, {', '.join(p + '_<peer>' for p in PEER_FACTORS)}, "
+                             "or a key of [params])")
         else:
             _check_value(key, value, where)
 

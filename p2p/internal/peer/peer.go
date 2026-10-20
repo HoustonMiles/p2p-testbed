@@ -8,8 +8,10 @@
 //  5. Throughput  one link at a time: the lower ID sends at RateMbit for
 //     Duration, then the other
 //
-// Steps 1 and 2 happen once per peer. From step 3 on, each link runs on its
-// own goroutine and moves to its next step as soon as it and the member are
+// Steps 1 and 2 happen once per peer. A link starts the moment the
+// rendezvous introduces its member, so members may arrive at different
+// times and the mesh grows as they come. Each link runs on its own
+// goroutine and moves to its next step as soon as it and the member are
 // ready, meeting the member at a barrier between steps; a slow or dead link
 // holds up only itself. A link that fails a step drops out with its result.
 //
@@ -176,17 +178,12 @@ func (r *runner) run() error {
 	defer close(r.stop)
 	go r.readLoop()
 
-	if err := r.meet(); err != nil {
-		return err
-	}
 	if r.cfg.Direct != nil {
 		defer r.closeHoppers() // after linger has stopped the links
 		r.ports = direct.NewPorts(r.localIP())
-		r.res.KeepsPort = ptr(r.keepsPort())
 	}
-	for _, l := range r.sortedLinks() {
-		r.wg.Add(1)
-		go l.run()
+	if err := r.meet(); err != nil {
+		return err
 	}
 	r.runTests()
 	r.linger()
@@ -205,7 +202,7 @@ func (r *runner) validate() error {
 	return nil
 }
 
-// meet runs steps 1 and 2.
+// meet runs steps 1 and 2; the links start as their members are introduced.
 func (r *runner) meet() error {
 	var err error
 	if r.rdv, err = r.rendezvousClient(); err != nil {

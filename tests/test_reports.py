@@ -135,7 +135,8 @@ class MeshReportTest(unittest.TestCase):
 
     def mesh_trial(self, config_id: str, label: str, **columns) -> dict:
         row = {"config_id": config_id, "config_label": label, "ok": True, "pairs": 6, "pairs_usable": 6,
-               "pairs_as_predicted": 6, "time_to_usable_ms": 400.0, "time_to_full_mesh_ms": 400.0}
+               "pairs_as_predicted": 6, "time_to_usable_ms": 400.0, "time_to_full_mesh_ms": 400.0,
+               "join_ms_p50": 300.0}
         row.update(columns)
         return row
 
@@ -154,7 +155,7 @@ class MeshReportTest(unittest.TestCase):
                             time_to_full_mesh_ms=None),
         ])
         full, partial = self.columns(report(reports.mesh, [run]), 1)
-        self.assertEqual((full["n"], full["full"], full["ready_p50_ms"], full["ready_max_ms"], full.get("!")),
-                         ("2", "1.00", "500.00", "600.00", None))
+        self.assertEqual((full["n"], full["full"], full["ready_p50_ms"], full["ready_max_ms"], full["join_p50_ms"],
+                          full.get("!")), ("2", "1.00", "500.00", "600.00", "300.00", None))
         self.assertEqual((partial["ok"], partial["usable"], partial["as_predicted"], partial["full"], partial["!"]),
                          ("0.000", "4.00", "0.833", "0.000", "!"))

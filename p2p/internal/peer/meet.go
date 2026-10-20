@@ -3,6 +3,7 @@ package peer
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"time"
 
 	"p2ptestbed/p2p/internal/rendezvous"
@@ -49,11 +50,13 @@ func (r *runner) rendezvousClient() (*rendezvous.Client, error) {
 }
 
 // meetAtRendezvous registers until the room's other members are all
-// introduced. Fewer after the timeout is not fatal: the run goes on with
-// the members it met, and every link has the same members to test.
+// introduced; each member's link starts the moment it is (onPeerInfo), so
+// a mesh grows while members are still arriving. Fewer after the timeout
+// is not fatal: the run goes on with the members it met.
 //
-// TODO(paper §5, mesh): members that join after the meeting are ignored;
-// a long-running peer would link with them as they come.
+// TODO(paper §5, mesh): once the room is full or the timeout has passed,
+// later members are ignored; a long-running peer would keep linking with
+// members as they come, and replace those that leave.
 func (r *runner) meetAtRendezvous() error {
 	register, want := r.rdv.Register(), r.cfg.Peers-1
 	r.pump(r.cfg.RendezvousTimeout, 100*time.Millisecond,
@@ -86,23 +89,35 @@ func (r *runner) keepRegistered() {
 	}
 }
 
-// onPeerInfo adds a link for each member introduced during the meeting.
+// onPeerInfo starts a link for each member introduced during the meeting,
+// up to the room's size.
 func (r *runner) onPeerInfo(m inbound) {
 	in, ok := r.rdv.Introduction(m.from, m.pkt)
-	if !ok || r.met || r.links[in.PeerID] != nil {
+	if !ok || r.met || r.links[in.PeerID] != nil || len(r.links) >= r.cfg.Peers-1 {
 		return
 	}
 	if r.res.RdvAddr == nil {
-		r.res.RdvAddr = ptr(in.Self.String())
-		if r.stunGot.IsValid() {
-			r.res.MappingVaries = ptr(r.stunGot != in.Self)
-		}
+		r.noteMapping(in.Self)
 	}
 	l := newLink(r, in, m.at)
 	r.linksMu.Lock()
 	r.links[in.PeerID] = l
 	r.linksMu.Unlock()
 	r.logf("rendezvous: we are %v, member %016x is %v", in.Self, in.PeerID, in.Peer)
+	r.wg.Add(1)
+	go l.run()
+}
+
+// noteMapping compares the mapping the rendezvous saw with STUN's, before
+// the first link needs to know whether our NAT keeps ports.
+func (r *runner) noteMapping(self netip.AddrPort) {
+	r.res.RdvAddr = ptr(self.String())
+	if r.stunGot.IsValid() {
+		r.res.MappingVaries = ptr(r.stunGot != self)
+	}
+	if r.cfg.Direct != nil {
+		r.res.KeepsPort = ptr(r.keepsPort())
+	}
 }
 
 // onPeerLeft marks a member gone; links still waiting on it then fail at
