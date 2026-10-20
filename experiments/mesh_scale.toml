@@ -1,0 +1,47 @@
+# =============================================================================
+# Mesh scale: does a full mesh of direct links form as N grows?
+#
+# Every peer starts punch -direct at the same moment, in one room: the
+# heaviest load a forming mesh sees. Each peer links with every other
+# (N(N-1)/2 pairs), hops on its own schedule per link, and pings each member.
+#
+#   realistic   every home router port-restricted (the common case)
+#   mixed       NAT types round-robin (a full cone, b restricted, c port-
+#               restricted, d symmetric, e full cone, ...): some pairs
+#               cannot punch, some can punch but not hop
+#
+# Per trial (trials.jsonl): pairs, pairs_usable (hop-connected at both
+# ends), pairs_hop / _punch / _none / _error, pairs_as_predicted (RFC 4787,
+# see p2prunner/nat.py), time_to_usable_ms and time_to_full_mesh_ms (from
+# the first peer's start). Per link end (links.jsonl): the punch columns,
+# plus peer, member, outcome and predicted.
+#
+#   uv run python -m p2prunner plan experiments/mesh_scale.toml
+#   uv run python -m p2prunner run  experiments/mesh_scale.toml
+#   uv run python -m p2prunner mesh results/mesh_scale/<run>
+# =============================================================================
+
+name = "mesh_scale"
+description = "Full mesh of direct links for 2 to 16 peers, all starting at once, realistic and mixed NATs."
+trial = "mesh"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 120
+est_trial_s = 15          # links that cannot punch wait out -punch-timeout (10 s)
+args = "-direct -hop-interval 1s -pings 20 -ping-interval 50ms -rate-mbit 0"
+
+[matrix]
+peers = [2, 4, 8, 16]
+net_profile = ["coast"]
+
+[[matrix.nat_mix]]
+name = "realistic"
+nats = ["port_restricted"]
+
+[[matrix.nat_mix]]
+name = "mixed"
+nats = ["full_cone", "restricted", "port_restricted", "symmetric"]

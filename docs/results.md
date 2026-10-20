@@ -24,6 +24,7 @@
 | Mesh step 3b: link manager. One link per member (`-peers N`), punch, handshake, hop and pings on all links at once, throughput pair by pair in one global order, re-registration and PeerLeft, one result row per link | done, tests pass (3 and 4 peers on loopback, real binaries with 3) | `p2p/internal/peer/` (`link.go`, `punch.go`, `mesh_test.go`) |
 | Mesh step 4a: testbed of up to 255 peers. Address plan (WAN 198.18.0.0/15, LAN 10.200.k.0/24, carrier 10.201.k.0/24), generated compose file (`p2prunner up/compose/down --peers N --cgn ...`), a CGN only for the peers behind one, per-peer NAT and access link settings, matrix keys `peers` and `nats`, checks for every running peer, ARP table check | done, tests pass; in a 4-CPU VM: `verify --all` as 8 peers at once, smoke with 8, full direct mesh of 8 / 16 / 32 peers (56 / 240 / 992 links as RFC 4787 predicts; 32 in 11 s); 64 peers CPU-bound there | `p2prunner/topology.py`, `p2prunner/compose.py`, `testbed/prepare-host.sh` |
 | Mesh step 4b-1: per-link progress. Each link moves through punch, handshake, hop and pings on its own goroutine, so a dead link holds up only itself; new column `ready_ms` | done, tests pass; 8 mixed-NAT peers: all 30 hop-capable links ready within 0.5 s while the dead links punch for 10 s; 32 peers: 992/992 links hop-connected | `p2p/internal/peer/` (`link.go`, `mesh_test.go`) |
+| Mesh step 4b-2: `mesh` trial type (every peer at once), `links.jsonl`, mesh-level columns (pairs usable, as predicted by RFC 4787, time to full mesh), `start_unix_ms`, `p2prunner mesh` report, `mesh_scale` experiment | done, tests pass; in a 4-CPU VM without netem (2 runs per configuration): all 1,240 link ends as RFC 4787 predicts; realistic meshes complete at 2 to 16 peers, time to full mesh about 0.2 / 0.6 / 1.3 s at 4 / 8 / 16 peers | `p2prunner/mesh.py`, `p2prunner/nat.py` |
 | Result reports (standard library only) | done | `p2prunner hops`, `p2prunner compare` (`p2prunner/reports.py`) |
 | Tests: Go unit + fuzz tests beside the code, Python `unittest` in `tests/` | done | [testing.md](testing.md) |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
@@ -37,7 +38,7 @@
 
 | Part | What it is for |
 |---|---|
-| Full mesh, step 4b-2 and 5: a mesh trial type (every peer at once, `links.jsonl`), mesh-level columns (time to full mesh), per-peer clock offsets, staggered starts; a mesh experiment (hop success per link as N grows, port clashes) | The paper's system is a mesh of pairwise direct links |
+| Full mesh, next: peers joining a running mesh (so staggered starts mean something: the best case against the all-at-once worst case), per-peer clock offsets, port clashes between links | The paper's system is a mesh of pairwise direct links |
 | Relay baseline: coturn as a TURN relay in the testbed (198.18.0.102), `punch -relay`, `relay_path` experiment | The comparison baseline, and the path for pairings that cannot hop |
 | Handoff Manager | Falls back to the relay when `hop_possible` is false or hopping stops holding |
 | Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |

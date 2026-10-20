@@ -56,6 +56,7 @@ before `peers` existed, so older results still match.
 | `hop_matrix_oneway` | The 6 `hop_matrix` pairings with one symmetric side that can still punch (~20 min) |
 | `direct_path` | Experiment B: `punch_path` through the direct channel, realistic pairing x 3 distances (~10 min) |
 | `direct_path_overlap` | `direct_path` with `-hop-overlap 400ms`, the test that found the overlap problem (~10 min) |
+| `mesh_scale` | Full mesh of direct links for 2, 4, 8 and 16 peers, all starting at once, realistic (all port-restricted) and mixed NATs (~30 min) |
 
 **Trial types:** `nat_verify` (RFC 5780 check), `ping` (RTT from both peers to
 a WAN host), and `command`, which runs `cmd_a`/`cmd_b` on the peers. Each command
@@ -63,8 +64,18 @@ prints one JSON object on its last line, and its keys become result columns
 (prefixed `a_`/`b_`). This is how the experiments run `punch`; the trial
 seed is passed as its `-room`, so both peers of a trial find each other.
 `punch` prints one line per link, so with two peers the last line is the
-only one. The `command` trial runs on peers a and b only; a trial type for
-whole meshes is the next step (mesh step 4b-2).
+only one. The `command` trial runs on peers a and b only.
+
+The `mesh` trial runs `punch` on every peer of the configuration at the
+same moment, in one room (the trial seed), with the flags in `args`; in
+direct mode it first makes keys for peers that have none. Its trial row has
+mesh-level columns: `pairs` (N(N-1)/2), `pairs_usable` (hop-connected at
+both ends in direct mode, punched in raw mode), `pairs_hop`, `pairs_punch`,
+`pairs_none`, `pairs_error`, `pairs_as_predicted` (the outcome RFC 4787
+predicts for the pair's NAT behaviours, `p2prunner/nat.py`),
+`time_to_usable_ms` (from the first peer's start until the last usable
+pair was ready at both ends) and `time_to_full_mesh_ms` (the same, when
+every pair is usable). Each link end's own row goes to `links.jsonl`.
 
 **How trials are run:**
 - Each configuration's trials are split into blocks (`block_size`), and the
@@ -85,6 +96,7 @@ Each run goes to `results/<experiment>/<start time>/`:
 | `configs.jsonl` | every configuration start, with its NAT verification |
 | `meta.json` | date, git commit (and whether there were uncommitted changes), Docker/kernel versions, seed |
 | `experiment.toml` | exact copy of the experiment that ran |
+| `links.jsonl` | mesh trials: one row per link end, `punch`'s columns plus `peer`, `member`, the pair's `outcome` and `predicted`, and each end's expected `*_mapping` / `*_filtering`; join with trials.jsonl on `config_id` and `trial` |
 | `raw/` | full details per trial (e.g. every RTT sample) |
 
 `punch`'s result columns are listed in
@@ -111,7 +123,7 @@ symmetric does not, and those pairings need the relay.
 
 ## Reports
 
-Two reports need only Python's standard library (no numpy/pandas, so no
+The reports need only Python's standard library (no numpy/pandas, so no
 NixOS setup):
 
 ```bash
@@ -120,6 +132,9 @@ uv run python -m p2prunner hops results/hop_matrix/<run> results/hop_matrix_onew
 
 # any two runs of the same configurations, e.g. Experiment B: raw vs direct
 uv run python -m p2prunner compare results/punch_path/<run> results/direct_path/<run>
+
+# mesh trials: pairs usable, share as predicted, full meshes, time until ready
+uv run python -m p2prunner mesh results/mesh_scale/<run>
 ```
 
 Replace `<run>` with the run's folder name (e.g. `20261012-132335`); typed

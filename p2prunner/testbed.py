@@ -60,9 +60,12 @@ class Testbed:
         """Run a shell snippet inside a container."""
         return self.exec(service, ["sh", "-c", script], timeout=timeout)
 
-    def parallel(self, jobs: dict[str, callable]) -> dict:
-        """Run several functions at once; returns {name: result}."""
-        with ThreadPoolExecutor(max_workers=min(len(jobs), MAX_PARALLEL)) as pool:
+    def parallel(self, jobs: dict[str, callable], all_at_once: bool = False) -> dict:
+        """Run several functions at once; returns {name: result}. At most
+        MAX_PARALLEL run together, unless all_at_once (a mesh, whose peers
+        must all be running at the same time)."""
+        workers = len(jobs) if all_at_once else min(len(jobs), MAX_PARALLEL)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {name: pool.submit(fn) for name, fn in jobs.items()}
             return {name: f.result() for name, f in futures.items()}
 

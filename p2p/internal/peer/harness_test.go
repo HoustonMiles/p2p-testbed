@@ -190,6 +190,9 @@ func checkRow(t *testing.T, name string, r *Result) {
 	if !r.Punched || r.PunchMs == nil || r.ReadyMs == nil {
 		t.Errorf("%s: not punched, or never ready", name)
 	}
+	if since := time.Since(time.UnixMilli(int64(r.StartUnixMs))); since < 0 || since > time.Minute {
+		t.Errorf("%s: start_unix_ms %.0f is not when the run began", name, r.StartUnixMs)
+	}
 	if r.Direct && !r.HopConnected {
 		t.Errorf("%s: not hop connected", name)
 	}

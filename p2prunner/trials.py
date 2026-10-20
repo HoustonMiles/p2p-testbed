@@ -19,6 +19,7 @@ Available types:
   ping        round-trip time from each peer to a WAN host, through NAT + shaping
   command     run your own command on peer-a and/or peer-b (the hook for the
               Go client); each prints one JSON line of results at the end
+  mesh        punch on every peer at once, one full mesh (see mesh.py)
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import statistics
 from dataclasses import dataclass, field
 from string import Template
 
+from p2prunner.nat import expected_behaviour
 from p2prunner.topology import STUN_IP
 
 
@@ -37,6 +39,14 @@ class TrialContext:
     trial: int                    # trial number within its configuration (0-based)
     seed: int                     # random seed for this trial
     raw: dict = field(default_factory=dict)
+    links: list = field(default_factory=list)  # rows for links.jsonl (mesh trials)
+
+
+def fill(template: str, params: dict, ctx: TrialContext) -> str:
+    """A command template with $seed, $trial and $<param> filled in."""
+    values = {k: v for k, v in params.items() if not isinstance(v, (dict, list))}
+    values.update(seed=ctx.seed, trial=ctx.trial)
+    return Template(template).safe_substitute(values)
 
 
 # =============================================================================
@@ -68,29 +78,9 @@ def summarize(samples: list[float], prefix: str) -> dict:
 # =============================================================================
 # nat_verify: RFC 5780 behaviour discovery (also used by `p2prunner verify`)
 # =============================================================================
-# What each NAT type should measure as (RFC 4787 names):
-#   EI = endpoint-independent, AD = address-dependent,
-#   APD = address-and-port-dependent
-EXPECTED = {
-    "full_cone":       ("EI", "EI"),
-    "restricted":      ("EI", "AD"),
-    "port_restricted": ("EI", "APD"),
-    "symmetric":       ("APD", "APD"),
-}
-RANK = {"EI": 0, "AD": 1, "APD": 2}
+# natdiscovery's words for the RFC 4787 behaviours (see nat.py)
 WORDS = {"Endpoint Independent": "EI", "Address Dependent": "AD",
          "Address and Port Dependent": "APD"}
-
-
-def expected_behaviour(cfg, side: str) -> tuple[str, str]:
-    """Expected (mapping, filtering) for one side. Behind CGNAT, the pair of
-    NATs behaves like the stricter of the two, separately for each."""
-    m, f = EXPECTED[cfg.factors[f"nat_{side}"]]
-    if cfg.factors[f"upstream_{side}"] == "cgnat":
-        cm, cf = EXPECTED[cfg.factors[f"cgn_{side}"]]
-        m = max(m, cm, key=RANK.get)
-        f = max(f, cf, key=RANK.get)
-    return m, f
 
 
 def measure_behaviour(tb, side: str, raw: dict) -> tuple[str, str]:
@@ -208,12 +198,10 @@ def command(tb, cfg, params, ctx) -> dict:
 def command_jobs(tb, params: dict, ctx: TrialContext) -> dict:
     """One job per side that has a command, with placeholders filled in."""
     timeout = float(params.get("timeout_s", 60))
-    values = {k: v for k, v in params.items() if not isinstance(v, (dict, list))}
-    values.update(seed=ctx.seed, trial=ctx.trial)
     jobs = {}
     for side in "ab":
         if template := params.get(f"cmd_{side}"):
-            cmd = Template(template).safe_substitute(values)
+            cmd = fill(template, params, ctx)
             jobs[side] = (lambda side=side, cmd=cmd: tb.sh(f"peer-{side}", cmd, timeout=timeout))
     if not jobs:
         raise ValueError("command trial needs cmd_a and/or cmd_b in [params]")
@@ -244,6 +232,4 @@ def last_json(stdout: str) -> dict | None:
         return None
     return data if isinstance(data, dict) else None
 
-
-TRIALS = {"nat_verify": nat_verify, "ping": ping, "command": command}
 

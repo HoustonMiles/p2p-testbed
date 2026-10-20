@@ -22,6 +22,7 @@ Command line for the experiment runner.
 
   uv run python -m p2prunner hops RUN [RERUN ...]
   uv run python -m p2prunner compare BASE NEW [NEW_RERUN ...]
+  uv run python -m p2prunner mesh RUN [RERUN ...]
       Reports on finished runs (see p2prunner/reports.py).
 
 Trial order: each configuration's trials are split into blocks (block_size
@@ -47,11 +48,15 @@ from pathlib import Path
 from p2prunner import checks, reports
 from p2prunner import compose as compose_file
 from p2prunner import experiment as experiment_mod
+from p2prunner.mesh import mesh
 from p2prunner.store import ResultStore
 from p2prunner.testbed import Testbed, TestbedError
-from p2prunner.trials import TRIALS, TrialContext, nat_verify
+from p2prunner.trials import TrialContext, command, nat_verify, ping
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Trial types by name (see trials.py and mesh.py).
+TRIALS = {"nat_verify": nat_verify, "ping": ping, "command": command, "mesh": mesh}
 
 # Rough seconds per trial, for `plan` estimates only.
 EST_TRIAL_S = {"nat_verify": 12, "ping": None, "command": None}
@@ -164,6 +169,7 @@ def resume_run(args):
     exp = experiment_mod.load(store.dir / "experiment.toml")
     exp.runs = json.loads((store.dir / "meta.json").read_text())["runs"]
     done = store.done()
+    store.drop_unfinished_links(done)
     print(f"Resuming {store.dir} ({len(done)} trials already done)")
     return exp, store, done
 
@@ -294,6 +300,8 @@ def run_trial(run: Run, cfg, trial: int) -> dict:
         row.update(ok=False, error=f"{type(e).__name__}: {e}"[-300:])
         ctx.raw["traceback"] = traceback.format_exc()
     row["duration_s"] = round(time.monotonic() - t0, 3)
+    keys = {k: row[k] for k in ("config_id", "trial", "seed")}
+    run.store.add_links([{**keys, **link} for link in ctx.links])
     run.store.add_trial(row)
     run.store.save_raw(cfg.id, trial, ctx.raw)
     return row
@@ -365,6 +373,10 @@ def cmd_compare(args) -> int:
     return reports.compare(args.base, args.new)
 
 
+def cmd_mesh(args) -> int:
+    return reports.mesh(args.runs)
+
+
 # =============================================================================
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
@@ -428,4 +440,9 @@ def add_report_commands(sub) -> None:
     c.add_argument("base", metavar="BASE", help="results folder of the baseline, e.g. punch_path")
     c.add_argument("new", nargs="+", metavar="NEW", help="results folder(s) to compare against it")
     c.set_defaults(func=cmd_compare)
+
+    m = sub.add_parser("mesh", help="mesh trials: how much of each mesh came up, as predicted, how fast")
+    m.add_argument("runs", nargs="+", metavar="RUN",
+                   help="results folder; later folders replace the configurations they rerun")
+    m.set_defaults(func=cmd_mesh)
 

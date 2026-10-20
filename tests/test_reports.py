@@ -124,3 +124,37 @@ class CompareTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MeshReportTest(unittest.TestCase):
+    def setUp(self):
+        self.folders = ResultFolders()
+
+    def tearDown(self):
+        self.folders.cleanup()
+
+    def mesh_trial(self, config_id: str, label: str, **columns) -> dict:
+        row = {"config_id": config_id, "config_label": label, "ok": True, "pairs": 6, "pairs_usable": 6,
+               "pairs_as_predicted": 6, "time_to_usable_ms": 400.0, "time_to_full_mesh_ms": 400.0}
+        row.update(columns)
+        return row
+
+    def columns(self, out: str, label_words: int) -> list[dict]:
+        rows = []
+        for line in out.splitlines()[1:]:
+            values = line.split()
+            rows.append(dict(zip(reports.MESH_HEADER[1:], values[label_words:])))
+        return rows
+
+    def test_full_and_partial_meshes(self):
+        run = self.folders.write("mesh", [
+            self.mesh_trial("c00-aaa111", "peers=4"),
+            self.mesh_trial("c00-aaa111", "peers=4", time_to_usable_ms=600.0, time_to_full_mesh_ms=600.0),
+            self.mesh_trial("c01-bbb222", "peers=4b", ok=False, pairs_usable=4, pairs_as_predicted=5,
+                            time_to_full_mesh_ms=None),
+        ])
+        full, partial = self.columns(report(reports.mesh, [run]), 1)
+        self.assertEqual((full["n"], full["full"], full["ready_p50_ms"], full["ready_max_ms"], full.get("!")),
+                         ("2", "1.00", "500.00", "600.00", None))
+        self.assertEqual((partial["ok"], partial["usable"], partial["as_predicted"], partial["full"], partial["!"]),
+                         ("0.000", "4.00", "0.833", "0.000", "!"))

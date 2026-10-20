@@ -8,7 +8,10 @@ Reports on finished runs.
       Two runs of the same configurations side by side, e.g. punch_path
       (raw) against direct_path (Noise + hopping) for Experiment B.
 
-Both run with plain python3 as well: standard library only.
+  uv run python -m p2prunner mesh RUN [RERUN ...]
+      Mesh trials: how much of each mesh came up, as predicted, how fast.
+
+All run with plain python3 as well: standard library only.
 """
 
 from __future__ import annotations
@@ -132,3 +135,39 @@ def pooled_row(metrics: list, changes: dict[str, list[float]]) -> list[str]:
         m = median(changes[column])
         row.append("-" if m is None else f"{'+' if m >= 0 else ''}{fmt(m)} {unit}".strip())
     return row
+
+
+# =============================================================================
+# mesh
+# =============================================================================
+MESH_HEADER = ["config", "n", "ok", "pairs", "usable", "as_predicted", "full", "ready_p50_ms", "ready_max_ms", "!"]
+
+
+def mesh(paths: list[str]) -> int:
+    """Per configuration: the share of trials that ran cleanly (ok), pairs
+    per mesh and the median that came up usable, the share of all pairs
+    whose outcome RFC 4787 predicts (as_predicted), the share of trials that
+    formed a full mesh, and how long the usable pairs took to be ready
+    (time_to_usable_ms, from the first peer's start). "!" marks a
+    configuration where some pair did not do as predicted."""
+    groups = by_config(load_runs(paths))
+    table = [mesh_row(trials) for trials in groups.values()]
+    table.sort(key=lambda r: (int(r[3]) if r[3].isdigit() else 0, r[0]))
+    print_table(MESH_HEADER, table)
+    return 0
+
+
+def mesh_row(trials: list[dict]) -> list[str]:
+    pairs = sum(r.get("pairs", 0) for r in trials)
+    predicted = sum(r.get("pairs_as_predicted", 0) for r in trials)
+    ready = sorted(v for r in trials if (v := number(r, "time_to_usable_ms")) is not None)
+    return [
+        trials[0].get("config_label", trials[0]["config_id"]), str(len(trials)),
+        fmt(share([bool(r.get("ok")) for r in trials])),
+        str(trials[0].get("pairs", "-")),
+        fmt(median([v for r in trials if (v := number(r, "pairs_usable")) is not None])),
+        fmt(predicted / pairs if pairs else None),
+        fmt(share([r.get("time_to_full_mesh_ms") is not None for r in trials])),
+        fmt(median(ready)), fmt(ready[-1] if ready else None),
+        "!" if predicted != pairs else "",
+    ]

@@ -41,7 +41,8 @@ type PeerResult struct {
 	ClockOffsetMs float64  `json:"clock_offset_ms"`
 	ClockDriftPPM float64  `json:"clock_drift_ppm"`
 
-	TotalMs float64 `json:"total_ms"`
+	StartUnixMs float64 `json:"start_unix_ms"` // when the run began: puts every member's *_ms on one timeline
+	TotalMs     float64 `json:"total_ms"`
 }
 
 // LinkResult is what this peer measured on one link.

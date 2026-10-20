@@ -163,7 +163,9 @@ mount it.
 
 One row per link. The peer's own columns repeat in each of its rows:
 `name`, `room`, `id`, `members` (the room's members it met, itself
-included), `local`, `stun_*`, `rdv_addr`, `mapping_varies` and the settings.
+included), `local`, `stun_*`, `rdv_addr`, `mapping_varies`, the settings,
+and `start_unix_ms` (when its run began, which puts every member's `*_ms`
+columns on one timeline).
 The link's own: `peer_id` (the member at the other end), `error`, the
 rendezvous and punch steps, `ready_ms` (start to the link being usable:
 punched, and in direct mode hopping both ways), the ping and throughput measurements

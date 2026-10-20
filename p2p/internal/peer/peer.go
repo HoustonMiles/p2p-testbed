@@ -155,7 +155,8 @@ func newRunner(cfg Config) *runner {
 		done:  make(chan struct{}),
 		stop:  make(chan struct{}),
 	}
-	r.res = PeerResult{Name: cfg.Name, Room: cfg.Room, ID: idString(r.id), RateMbit: cfg.RateMbit, PacketBytes: cfg.Size}
+	r.res = PeerResult{Name: cfg.Name, Room: cfg.Room, ID: idString(r.id), RateMbit: cfg.RateMbit, PacketBytes: cfg.Size,
+		StartUnixMs: float64(r.t0.UnixMicro()) / 1000}
 	if d := cfg.Direct; d != nil {
 		r.res.Direct, r.res.Noise, r.res.PeerKeyFrom = true, d.Noise, d.PeerKeyFrom
 		r.res.HopIntervalMs = ptr(ms(d.HopInterval))
