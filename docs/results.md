@@ -37,6 +37,7 @@
 | **Result:** punch path (raw baseline) | 60/60 trials; RTT = profile RTT, link fully used | `results/punch_path/20261012-132335` |
 | **Result:** Experiment A, hop success | 320/320 trials; hopping holds in all 18 configurations where both NATs keep ports, fails in the rest, as the port check predicts | `results/hop_matrix/20261012-104647` + `results/hop_matrix_oneway/20261012-121649` |
 | **Result:** mesh join | 80/80 trials; every pair as RFC 4787 predicts at every size and spacing; join time about 425 ms in every configuration (about six coast round trips), so neither load nor start pattern matters up to 16 peers | `results/mesh_join/20261020-111009` |
+| **Result:** relay baseline | 380/380 trials; the relay adds 0.56 ms RTT on the path and exactly 2 x its detour off it; goodput matches header overhead exactly; it connects all 32 NAT configurations | `results/relay_path/20261020-141454`, `results/relay_detour/20261020-142341`, `results/relay_matrix/20261020-143233` |
 | **Result:** Experiment B, performance cost | 30/30 trials; no latency cost, -2.0% goodput (= Noise overhead), no loss from hopping | `results/direct_path/` (latest run, drain-based close) |
 
 ## Not done
@@ -44,7 +45,6 @@
 | Part | What it is for |
 |---|---|
 | Full mesh, next: per-peer clock offsets in mesh trials, port clashes between a peer's links, a long-running mesh (members leaving and rejoining) | The paper's system is a mesh of pairwise direct links |
-| Run the relay experiments: `relay_matrix`, `relay_path`, `relay_detour` (netem needed, so on a real host) | Experiment B's third arm and the relay's reach across NATs |
 | Handoff Manager | Falls back to the relay when `hop_possible` is false or hopping stops holding |
 | Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |
 | Experiment C | Attack resilience, direct hopping vs relay (`hop_drain_cutoffs`, `hop_unrouted`, `hop_foreign`, `hop_auth_failed` are there for it) |
@@ -84,17 +84,22 @@ configurations, so the handoff to the relay can be decided before any hop
 is tried. CGNAT does not break hopping here only because both Linux NAT
 layers keep the source port (see the paper notes: threats to validity).
 
-## Experiment B: what do Noise and hopping cost?
+## Experiment B: what do Noise, hopping and relaying cost?
 
-`direct_path` against `punch_path`, realistic pairing (port-restricted on
-both sides), 50 Mbit/s links, 60 Mbit/s offered per direction, 1 s slots.
-Medians of 10 trials, both sides. Compared with `p2prunner compare`.
+`punch_path` (raw), `direct_path` (Noise + hopping) and `relay_path` (Noise
+through the TURN relay, relay on the path), realistic pairing
+(port-restricted on both sides), 50 Mbit/s links, 60 Mbit/s offered per
+direction, 1 s slots. Medians of 10 trials, both sides. Compared with
+`p2prunner compare`; the three experiments share their configuration IDs.
 
-| Profile | RTT p50 raw / direct | rx_ip_mbit raw / direct | rx_mbit raw / direct | rx_loss raw / direct | Handshake |
+| Profile | RTT p50 raw / direct / relay | rx_ip_mbit raw / direct / relay | rx_mbit raw / direct / relay | rx_loss raw / direct / relay | Handshake direct / relay |
 |---|---|---|---|---|---|
-| local | 10.68 / 10.67 ms | 49.43 / 49.44 | 48.31 / 47.35 | 0.143 / 0.159 | 8.8 ms |
-| coast | 70.55 / 70.96 ms | 49.34 / 49.36 | 48.22 / 47.27 | 0.153 / 0.169 | 64.0 ms |
-| transatlantic | 151.95 / 151.44 ms | 49.34 / 49.30 | 48.21 / 47.22 | 0.165 / 0.180 | 128.6 ms |
+| local | 10.68 / 10.67 / 11.23 ms | 49.43 / 49.44 / 49.43 | 48.31 / 47.35 / 47.04 | 0.143 / 0.159 / 0.164 | 8.8 / 9.4 ms |
+| coast | 70.55 / 70.96 / 71.95 ms | 49.34 / 49.36 / 49.33 | 48.22 / 47.27 / 46.94 | 0.153 / 0.169 / 0.173 | 64.0 / 62.0 ms |
+| transatlantic | 151.95 / 151.44 / 151.79 ms | 49.34 / 49.30 / 49.31 | 48.21 / 47.22 / 46.93 | 0.165 / 0.180 / 0.185 | 128.6 / 118.5 ms |
+
+Runs: `results/relay_path/20261020-141454` against the `direct_path` and
+`punch_path` runs below.
 
 - No latency cost: RTT p50, p95 and jitter unchanged within 0.25 ms.
 - The link is fully used (`rx_ip_mbit` unchanged). Goodput is 2.0% lower:
@@ -106,6 +111,32 @@ Medians of 10 trials, both sides. Compared with `p2prunner compare`.
   1 - (1 - raw loss) x 0.980 predicts 0.160 / 0.170 / 0.182, measured
   0.159 / 0.169 / 0.180.
 - The handshake costs about one RTT, once per session.
+- **The relay on the path costs 0.56 ms of RTT** (median over the three
+  profiles; coturn's processing) and nothing in jitter or handshake time.
+- **Relayed goodput is exactly the header arithmetic:** each relayed packet
+  carries 33 bytes more than raw (Noise's 29 since mesh step 3a, plus
+  ChannelData's 4), so raw x 1228/1261 predicts 47.05 / 46.96 / 46.95,
+  measured 47.04 / 46.94 / 46.93. Against today's direct channel (29
+  bytes), relaying costs only ChannelData's 0.3%; the 0.7% gap in the
+  table is mostly the receiver index added after `direct_path` ran.
+
+**Relay detour** (`relay_detour`, coast, the relay delaying what it sends):
+
+| Relay delay | RTT p50 | Direct + 2 x delay | rx_mbit | Handshake |
+|---|---|---|---|---|
+| 0 ms | 71.88 ms | 70.96 | 46.98 | 62.2 ms |
+| 10 ms | 91.56 ms | 90.96 | 46.93 | 78.3 ms |
+| 40 ms | 151.39 ms | 150.96 | 46.98 | 120.3 ms |
+
+A relay out of the way costs exactly its detour, twice per round trip, and
+nothing else: goodput and loss do not move. A relay a continent away (40 ms)
+doubles the coast RTT. Run: `results/relay_detour/20261020-142341`.
+
+**Relay reach** (`relay_matrix`, all 16 pairings with and without CGNAT,
+coast, 10 trials each): 320/320 trials connected through the relay, every
+pairing as predicted, including the 8 configurations that cannot punch.
+Direct hopping holds in 18 of the 32 (Experiment A); the relay is the only
+path in the other 14. Run: `results/relay_matrix/20261020-143233`.
 
 **Overlap finding.** The first `direct_path` run used a fixed 100 ms overlap
 (the old port closed 100 ms after each boundary) and lost ~8% more
@@ -141,7 +172,9 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 - Define jitter: the profiles' ±7 / ±11 ms per-direction ranges, or the
   measured standard deviation.
 - Report the NAT matrix, path baseline, punch matrix and Experiments A and B
-  (tables above).
+  (tables above), with the relay as Experiment B's third arm: on the path
+  it costs under a millisecond, off the path exactly its detour; it reaches
+  every NAT pairing, hopping 18 of 32.
 - The overlap finding: the old port must stay open for the queueing delay,
   not just the RTT; fixed 100 ms lost ~8% under load, drain-based close
   loses nothing.
