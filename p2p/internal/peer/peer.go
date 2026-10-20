@@ -1,14 +1,17 @@
 // Package peer is one member of a peer-to-peer trial. It links with every
-// other member of its room (a full mesh) and measures each link. All
-// members run the same steps at the same time, meeting at a barrier between
-// steps on every link:
+// other member of its room (a full mesh) and measures each link:
 //
 //  1. STUN        our public address, as one server sees it (reported only)
 //  2. Rendezvous  register in the room until the other members are introduced
-//  3. Punch       punch every member until a PunchAck proves the path works both ways
-//  4. Ping        ping every member at once
+//  3. Punch       punch the member until a PunchAck proves the path works both ways
+//  4. Ping        ping the member
 //  5. Throughput  one link at a time: the lower ID sends at RateMbit for
 //     Duration, then the other
+//
+// Steps 1 and 2 happen once per peer. From step 3 on, each link runs on its
+// own goroutine and moves to its next step as soon as it and the member are
+// ready, meeting the member at a barrier between steps; a slow or dead link
+// holds up only itself. A link that fails a step drops out with its result.
 //
 // With Config.Direct set, steps 4 and 5 run over the Port-Hopping Direct
 // Channel (package direct) instead of plain UDP: after the punch each link
@@ -19,7 +22,6 @@
 // Everything before hopping uses ONE socket, because the NAT mapping the
 // rendezvous server sees is the one the peers punch through.
 //
-// A link that fails a step drops out with its result; the others go on.
 // Throughput runs pair by pair in one order every member agrees on (sorted
 // by the pair's IDs), so no two members ever wait on each other in a cycle.
 //
@@ -57,7 +59,7 @@ type Config struct {
 	RefreshInterval   time.Duration // re-register this often while running; 0 means 1 s (under the rendezvous TTL)
 	PunchTimeout      time.Duration
 	PunchInterval     time.Duration
-	StepTimeout       time.Duration // how long to wait for a member at a barrier; in rooms of 3+, plus the punch and handshake timeouts
+	StepTimeout       time.Duration // how long to wait for a member at a barrier
 
 	Pings        int // 0 skips step 4
 	PingInterval time.Duration
@@ -122,6 +124,8 @@ type runner struct {
 	linksMu sync.RWMutex     // links is read by the reader goroutines
 	links   map[uint64]*link // by peer ID
 	ports   *direct.Ports    // the links' shared hop sockets, in direct mode
+	wg      sync.WaitGroup   // the links' goroutines
+	done    chan struct{}    // ends the links' goroutines
 	stop    chan struct{}    // ends keepRegistered
 }
 
@@ -148,6 +152,7 @@ func newRunner(cfg Config) *runner {
 		in:    make(chan inbound, 4096),
 		id:    newID(cfg),
 		links: map[uint64]*link{},
+		done:  make(chan struct{}),
 		stop:  make(chan struct{}),
 	}
 	r.res = PeerResult{Name: cfg.Name, Room: cfg.Room, ID: idString(r.id), RateMbit: cfg.RateMbit, PacketBytes: cfg.Size}
@@ -170,16 +175,19 @@ func (r *runner) run() error {
 	defer close(r.stop)
 	go r.readLoop()
 
-	if err := r.connect(); err != nil {
+	if err := r.meet(); err != nil {
 		return err
 	}
 	if r.cfg.Direct != nil {
-		// Deferred last, so it runs first: the hoppers must stop before
-		// readLoop closes r.in.
-		defer r.closeHoppers()
-		r.startDirect()
+		defer r.closeHoppers() // after linger has stopped the links
+		r.ports = direct.NewPorts(r.localIP())
+		r.res.KeepsPort = ptr(r.keepsPort())
 	}
-	r.measure()
+	for _, l := range r.sortedLinks() {
+		r.wg.Add(1)
+		go l.run()
+	}
+	r.runTests()
 	r.linger()
 	return nil
 }
@@ -196,8 +204,8 @@ func (r *runner) validate() error {
 	return nil
 }
 
-// connect runs steps 1-3 and the barrier after them on every link.
-func (r *runner) connect() error {
+// meet runs steps 1 and 2.
+func (r *runner) meet() error {
 	var err error
 	if r.rdv, err = r.rendezvousClient(); err != nil {
 		return err
@@ -211,8 +219,6 @@ func (r *runner) connect() error {
 		return err
 	}
 	go r.keepRegistered()
-	r.punchAll()
-	r.barrierAll(barrierWait{step: stepConnected, timeout: r.stepTimeout()})
 	return nil
 }
 

@@ -109,8 +109,8 @@ func (r *runner) onPeerInfo(m inbound) {
 // their next barrier instead of timing out. Finished links keep their result.
 func (r *runner) onPeerLeft(m inbound) {
 	id, ok := r.rdv.Departure(m.from, m.pkt)
-	if l := r.links[id]; ok && l != nil && !l.left {
-		l.left = true
+	if l := r.links[id]; ok && l != nil && !l.left.Load() {
+		l.left.Store(true)
 		l.logf("rendezvous: the member left the room")
 	}
 }

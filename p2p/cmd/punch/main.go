@@ -87,7 +87,7 @@ func connectFlags(c *peer.Config) {
 	flag.DurationVar(&c.RendezvousTimeout, "rendezvous-timeout", 15*time.Second, "wait this long for the other members of the room")
 	flag.DurationVar(&c.PunchTimeout, "punch-timeout", 10*time.Second, "give up hole punching after this long")
 	flag.DurationVar(&c.PunchInterval, "punch-interval", 50*time.Millisecond, "time between punch packets")
-	flag.DurationVar(&c.StepTimeout, "step-timeout", 10*time.Second, "wait this long for a member between steps (in rooms of 3+, plus the punch and handshake timeouts)")
+	flag.DurationVar(&c.StepTimeout, "step-timeout", 10*time.Second, "wait this long for a member at each step of a link")
 	flag.DurationVar(&c.Linger, "linger", 500*time.Millisecond, "keep answering the peer this long before exiting")
 }
 

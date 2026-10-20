@@ -13,8 +13,9 @@ p2p/
   internal/
     peer/             one peer's run, with one link per member: peer.go (the steps),
                       socket.go (the one socket, dispatch to links), meet.go (STUN, rendezvous),
-                      link.go (one link's state), punch.go, handshake.go, hop.go, barrier.go,
-                      measure.go, result.go; loopback_test.go and mesh_test.go run whole trials
+                      link.go (one link: its goroutine and state), punch.go, handshake.go,
+                      hop.go, barrier.go, measure.go, result.go; loopback_test.go and
+                      mesh_test.go run whole trials
     rendezvous/       rooms: server.go, and client.go (a member's side)
     stun/             STUN messages
     direct/           the port-hopping channel: schedule, hopper, slots, probe, drain, receive
@@ -40,16 +41,21 @@ Both programs are compiled into the peer image
   of the room is sent PeerLeft. It never relays peer traffic.
 - `punch` runs on every member of a room at once (`-peers N`, default 2),
   on one UDP socket: STUN, registration in the room until the other N-1
-  members are introduced, hole punching with all of them at once (switching
-  to a member's real address if its packets arrive from a different port),
-  pings to all of them at once, then throughput one link at a time: in each
+  members are introduced, then on each link at once: hole punching
+  (switching to a member's real address if its packets arrive from a
+  different port) and pings; then throughput one link at a time: in each
   pair the peer with the lower ID sends first, then the other. It prints one
   JSON line of results per link at the end.
 
-**A full mesh.** Each member keeps one link per other member, and each
-link's steps meet at their own barriers, so a link that fails (no punch, no
-hop, a member that left) ends with its result and the others go on. The
-throughput tests run pair by pair in one order every member computes the
+**A full mesh.** Each member keeps one link per other member. From the
+punch on, each link runs on its own goroutine and moves to its next step as
+soon as both its ends are ready, meeting the member at a barrier between
+steps (each waits `-step-timeout`). A link that fails (no punch, no hop, a
+member that left) ends with its result, and no other link waits for it:
+`ready_ms` says when each link became usable. (Until mesh step 4b all links
+moved through the steps together, so one link that never punched held every
+other link of its peer back for the whole punch timeout.) The throughput
+tests run pair by pair in one order every member computes the
 same way, sorted by the pair's IDs: no two members can wait on each other in
 a cycle, and no two tests share a peer's link capacity (a "ready" barrier
 starts each pair's test). Pairs with no member in common may test at the
@@ -59,16 +65,10 @@ it fail at once ("left the room") instead of timing out. Members that come
 after the meeting are ignored; with fewer than N-1 after
 `-rendezvous-timeout`, the run goes on with those it met (`members`).
 
-**How long a barrier waits.** In a room of three or more, a barrier waits
-`-step-timeout` plus the punch and handshake timeouts. A link that never
-punches (or whose handshake never ends) holds its peer in that step for the
-whole timeout, however soon its other links were done, and every member
-waiting on that peer falls behind with it. With only `-step-timeout`, the
-members whose links were all quick gave up on the held-back ones at about
-the moment those arrived, and good links failed at random (seen with 8
-peers and a symmetric NAT). A member that really left is still noticed at
-once, through PeerLeft. In a room of two there is no other link to be held
-by, so the wait stays `-step-timeout`.
+Two waits still span links. A peer starts its throughput tests only once
+all its links are done pinging, so no ping is measured under a test's load.
+And a pair's "ready" barrier before its test allows for the member still
+bringing up its other links and testing the pairs ahead of ours.
 
 Every packet carries the room and the sender's peer ID (the start of its
 static key in direct mode, random otherwise); a peer accepts packets only
@@ -165,7 +165,8 @@ One row per link. The peer's own columns repeat in each of its rows:
 `name`, `room`, `id`, `members` (the room's members it met, itself
 included), `local`, `stun_*`, `rdv_addr`, `mapping_varies` and the settings.
 The link's own: `peer_id` (the member at the other end), `error`, the
-rendezvous and punch steps, the ping and throughput measurements
+rendezvous and punch steps, `ready_ms` (start to the link being usable:
+punched, and in direct mode hopping both ways), the ping and throughput measurements
 (`rtt_ms_*`, `tx_*`, `rx_*`), and `rx_start_ms` / `rx_end_ms` (when the
 link's Data arrived, since start: the test's place in the run). Before mesh
 step 2, `name` and `room` were `role` and `session`.

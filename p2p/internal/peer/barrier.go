@@ -51,68 +51,48 @@ func (w barrierWait) passed(l *link) bool {
 
 // errFor says why l missed the barrier.
 func (w barrierWait) errFor(l *link) error {
-	if l.left {
+	if l.left.Load() {
 		return fmt.Errorf("the member left the room before step %d", w.step)
 	}
 	return fmt.Errorf("the member did not reach step %d within %v", w.step, w.timeout)
 }
 
-// stepTimeout is how long a barrier waits for a member: StepTimeout, plus
-// how far the member may trail us through no fault of our link.
-func (r *runner) stepTimeout() time.Duration { return r.cfg.StepTimeout + r.lag() }
-
-// lag: a link that never punches, or whose handshake never ends, holds its
-// peer in that phase for the whole timeout, however soon its other links
-// were done; and every member that waits for that peer falls behind too.
-// In a room of two the member has no other link to be held by.
-func (r *runner) lag() time.Duration {
-	if len(r.links) < 2 {
-		return 0
+// setupTime is the longest a link can take from the meeting until it is
+// ready for its throughput test: every step's timeout in turn. A member may
+// still be bringing up a link that tests before ours.
+func (r *runner) setupTime() time.Duration {
+	c := r.cfg
+	t := c.PunchTimeout + c.StepTimeout // punch, connected
+	if c.Direct != nil {
+		t += r.handshakeTimeout() + 2*c.StepTimeout // handshake, secured, hopping
 	}
-	lag := r.cfg.PunchTimeout
-	if r.cfg.Direct != nil {
-		lag += r.handshakeTimeout()
+	if c.Pings > 0 {
+		t += time.Duration(c.Pings+1)*c.PingInterval + c.StepTimeout + c.PingGrace + c.StepTimeout // pings, pinged
 	}
-	return lag
+	return t
 }
 
-// barrier waits until every link in ls has passed w, and returns those that
-// did not within the timeout. Both sides announce the step; whoever is
-// first answers the latecomer with a BarrierAck. A member that left is not
-// waited for.
-func (r *runner) barrier(ls []*link, w barrierWait) (missed []*link) {
-	for _, l := range ls {
-		l.reached, l.myValue[w.step] = w.step, w.value
-	}
-	waiting := func() []*link {
-		var out []*link
-		for _, l := range ls {
-			if !l.left && !w.passed(l) {
-				out = append(out, l)
-			}
-		}
-		return out
-	}
-	r.pump(w.timeout, 50*time.Millisecond,
+// meet waits until l has passed w and reports whether it did within the
+// timeout. Both sides announce the step; whoever is first answers the
+// latecomer with a BarrierAck. A member that left is not waited for.
+func (l *link) meet(w barrierWait) bool {
+	l.reached, l.myValue[w.step] = w.step, w.value
+	return l.pump(w.timeout, 50*time.Millisecond,
 		func() {
-			for _, l := range waiting() {
+			if !w.passed(l) {
 				l.send(wire.Barrier, w.step, wire.U64(w.value))
 			}
 		},
-		func() bool { return len(waiting()) == 0 })
-	for _, l := range ls {
-		if !w.passed(l) {
-			missed = append(missed, l)
-		}
-	}
-	return missed
+		func() bool { return w.passed(l) || l.left.Load() }) && w.passed(l)
 }
 
-// barrierAll runs w on every active link and fails the links that miss it.
-func (r *runner) barrierAll(w barrierWait) {
-	for _, l := range r.barrier(r.active(), w) {
+// barrier is meet, and fails the link if the member missed it.
+func (l *link) barrier(w barrierWait) bool {
+	if !l.meet(w) {
 		l.fail(w.errFor(l))
+		return false
 	}
+	return true
 }
 
 func (l *link) onBarrier(m inbound) {

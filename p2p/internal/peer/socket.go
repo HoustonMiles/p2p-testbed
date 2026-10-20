@@ -23,8 +23,13 @@ func (r *runner) listen() error {
 	return nil
 }
 
-// linger keeps answering the members, which may still be finishing a step.
-func (r *runner) linger() { r.pump(r.cfg.Linger, 0, nil, never) }
+// linger keeps the links answering the members, which may still be
+// finishing a step, then stops them.
+func (r *runner) linger() {
+	r.pump(r.cfg.Linger, 0, nil, never)
+	close(r.done)
+	r.wg.Wait()
+}
 
 // readLoop reads the punched socket on its own goroutine.
 func (r *runner) readLoop() {
@@ -46,8 +51,9 @@ func (r *runner) readLoop() {
 }
 
 // deliver finds the packet's link, counts Data on the spot (it can arrive
-// at line rate) and queues everything else for the main loop. Packets from
-// a link's Hopper come with their link set and must be from that member.
+// at line rate) and queues everything else for the link's goroutine, or
+// for the main loop if it is from a server. Packets from a link's Hopper
+// come with their link set and must be from that member.
 func (r *runner) deliver(m inbound, b []byte) {
 	p, ok := wire.Parse(b)
 	if !ok || p.Room != r.cfg.Room || !r.accepts(&m, p) {
@@ -59,14 +65,14 @@ func (r *runner) deliver(m inbound, b []byte) {
 	}
 	p.Body = append([]byte(nil), p.Body...)
 	m.pkt = p
-	if !m.hop {
+	if m.link == nil {
 		r.in <- m
 		return
 	}
-	// Never block a Hopper's reader: Close waits for it, and the main loop
-	// may have stopped reading. A full queue counts as loss.
+	// Never block a reader on one slow link: the others share it, and
+	// a Hopper's Close waits for its reader. A full queue counts as loss.
 	select {
-	case r.in <- m:
+	case m.link.in <- m:
 	default:
 	}
 }
@@ -95,9 +101,24 @@ func (r *runner) link(id uint64) *link {
 
 func never() bool { return false }
 
+// queue is a goroutine's inbound packets and what handles them: the main
+// loop's (the servers) or one link's (its member).
+type queue struct {
+	in     <-chan inbound
+	handle func(inbound)
+}
+
+func (r *runner) pump(timeout, tick time.Duration, onTick func(), done func() bool) bool {
+	return queue{r.in, r.handle}.pump(timeout, tick, onTick, done)
+}
+
+func (l *link) pump(timeout, tick time.Duration, onTick func(), done func() bool) bool {
+	return queue{l.in, l.handle}.pump(timeout, tick, onTick, done)
+}
+
 // pump handles incoming packets until done() (returns true) or timeout
 // (returns done()). With tick > 0, onTick runs at once and then every tick.
-func (r *runner) pump(timeout, tick time.Duration, onTick func(), done func() bool) bool {
+func (q queue) pump(timeout, tick time.Duration, onTick func(), done func() bool) bool {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	var ticks <-chan time.Time
@@ -109,11 +130,11 @@ func (r *runner) pump(timeout, tick time.Duration, onTick func(), done func() bo
 	}
 	for !done() {
 		select {
-		case m, ok := <-r.in:
+		case m, ok := <-q.in:
 			if !ok {
 				return done()
 			}
-			r.handle(m)
+			q.handle(m)
 		case <-ticks:
 			onTick()
 		case <-deadline.C:
@@ -135,14 +156,17 @@ var linkHandlers = map[wire.Type]func(*link, inbound){
 	wire.Handshake:  (*link).onHandshake,
 }
 
+func (l *link) handle(m inbound) {
+	if h := linkHandlers[m.pkt.Type]; h != nil {
+		h(l, m)
+	}
+}
+
+// handle takes the servers' packets.
 func (r *runner) handle(m inbound) {
 	switch {
 	case m.stun != nil:
 		r.onSTUN(m)
-	case m.link != nil:
-		if h := linkHandlers[m.pkt.Type]; h != nil {
-			h(m.link, m)
-		}
 	case m.pkt.Type == wire.PeerInfo:
 		r.onPeerInfo(m)
 	case m.pkt.Type == wire.PeerLeft:

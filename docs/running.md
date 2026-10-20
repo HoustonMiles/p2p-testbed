@@ -64,7 +64,7 @@ prints one JSON object on its last line, and its keys become result columns
 seed is passed as its `-room`, so both peers of a trial find each other.
 `punch` prints one line per link, so with two peers the last line is the
 only one. The `command` trial runs on peers a and b only; a trial type for
-whole meshes is the next step (mesh step 4b).
+whole meshes is the next step (mesh step 4b-2).
 
 **How trials are run:**
 - Each configuration's trials are split into blocks (`block_size`), and the

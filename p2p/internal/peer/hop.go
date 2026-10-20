@@ -7,49 +7,47 @@ import (
 	"p2ptestbed/p2p/internal/direct"
 )
 
-// startDirect brings up the direct channel on every link: Noise handshake,
+// startDirect brings up the direct channel on the link: Noise handshake,
 // port check, hopper, then a first hop proven both ways. A link that cannot
 // hop ends there with that result.
 //
-// TODO(paper §5 Dynamic Handoff Mode): each link stopped here is where the
-// Handoff Manager should pivot that link to the relay instead.
-func (r *runner) startDirect() {
-	r.handshakeAll()
-	r.checkPorts()
-	r.ports = direct.NewPorts(r.localIP())
-	for _, l := range r.active() {
-		if err := l.startHopper(); err != nil {
-			l.fail(err)
-		}
+// TODO(paper §5 Dynamic Handoff Mode): a link stopped here is where the
+// Handoff Manager should pivot it to the relay instead.
+func (l *link) startDirect() bool {
+	if !l.handshake() || !l.checkPorts() {
+		return false
 	}
-	w := barrierWait{step: stepHopping, timeout: r.stepTimeout(), bothWays: true}
-	missed := r.barrier(r.active(), w)
-	for _, l := range missed {
+	if err := l.startHopper(); err != nil {
+		l.fail(err)
+		return false
+	}
+	w := barrierWait{step: stepHopping, timeout: l.r.cfg.StepTimeout, bothWays: true}
+	if !l.meet(w) {
 		l.stop("hop: no contact through the hopper: " + w.errFor(l).Error())
+		return false
 	}
-	for _, l := range r.active() {
-		l.res.HopConnected = true
-	}
+	l.res.HopConnected = true
+	return true
 }
 
-// checkPorts exchanges, at a barrier on every link, whether each side's
-// NAT keeps the local port as the public port, which hopping needs on both
-// sides.
-func (r *runner) checkPorts() {
-	keeps := r.keepsPort()
-	r.res.KeepsPort = ptr(keeps)
+// checkPorts exchanges, at a barrier, whether each side's NAT keeps the
+// local port as the public port, which hopping needs on both sides.
+func (l *link) checkPorts() bool {
+	keeps := *l.r.res.KeepsPort
 	var changes uint64 // barrier value: 1 = our NAT changes ports
 	if !keeps {
 		changes = 1
 	}
-	r.barrierAll(barrierWait{step: stepSecured, value: changes, timeout: r.stepTimeout()})
-	for _, l := range r.active() {
-		peerKeeps := l.peerValue[stepSecured] == 0
-		l.res.PeerKeepsPort, l.res.HopPossible = ptr(peerKeeps), ptr(keeps && peerKeeps)
-		if !(keeps && peerKeeps) && !r.cfg.Direct.HopForce {
-			l.stop("hop: not possible (a NAT changes ports); the relay would take over")
-		}
+	if !l.barrier(barrierWait{step: stepSecured, value: changes, timeout: l.r.cfg.StepTimeout}) {
+		return false
 	}
+	peerKeeps := l.peerValue[stepSecured] == 0
+	l.res.PeerKeepsPort, l.res.HopPossible = ptr(peerKeeps), ptr(keeps && peerKeeps)
+	if !(keeps && peerKeeps) && !l.r.cfg.Direct.HopForce {
+		l.stop("hop: not possible (a NAT changes ports); the relay would take over")
+		return false
+	}
+	return true
 }
 
 // keepsPort: STUN saw our local port, and the rendezvous saw the same

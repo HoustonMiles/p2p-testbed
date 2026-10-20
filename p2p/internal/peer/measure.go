@@ -17,39 +17,20 @@ import (
 
 const ipUDPHeader = 28
 
-// measure runs steps 4 and 5: pings on every link at once, then the
-// throughput tests one pair at a time.
-func (r *runner) measure() {
-	if r.cfg.Pings > 0 {
-		r.pingAll()
-		r.barrierAll(barrierWait{step: stepPinged, timeout: r.stepTimeout()})
-	}
-	for _, l := range r.testOrder() {
-		if r.cfg.RateMbit > 0 {
-			l.throughputTest()
-		}
-		l.finish()
-	}
-}
-
-func (r *runner) pingAll() {
-	ls, sent := r.active(), 0
-	r.pump(time.Duration(r.cfg.Pings+1)*r.cfg.PingInterval+r.cfg.StepTimeout, r.cfg.PingInterval,
+// ping runs step 4 on the link, then meets the member at a barrier.
+func (l *link) ping() {
+	c, sent := l.r.cfg, 0
+	l.pump(time.Duration(c.Pings+1)*c.PingInterval+c.StepTimeout, c.PingInterval,
 		func() {
-			if sent < r.cfg.Pings {
-				for _, l := range ls {
-					l.send(wire.Ping, uint64(sent), wire.U64(uint64(time.Since(r.t0))))
-				}
+			if sent < c.Pings {
+				l.send(wire.Ping, uint64(sent), wire.U64(uint64(time.Since(l.r.t0))))
 				sent++
 			}
 		},
-		func() bool { return sent >= r.cfg.Pings })
-	r.pump(r.cfg.PingGrace, 0, nil, func() bool {
-		return allLinks(ls, func(l *link) bool { return len(l.rtts) >= r.cfg.Pings })
-	})
-	for _, l := range ls {
-		l.recordPings(sent)
-	}
+		func() bool { return sent >= c.Pings })
+	l.pump(c.PingGrace, 0, nil, func() bool { return len(l.rtts) >= c.Pings })
+	l.recordPings(sent)
+	l.barrier(barrierWait{step: stepPinged, timeout: c.StepTimeout})
 }
 
 func (l *link) recordPings(sent int) {
@@ -98,15 +79,14 @@ func (l *link) onPong(m inbound) {
 }
 
 // throughputTest runs both directions on this link once the member is at
-// this pair too; it may first be testing pairs earlier in the order, which
-// the wait allows for. Nothing is sent before both sides are ready, so no
-// two tests share a peer's link capacity.
+// this pair too; it may first be bringing up its links and testing pairs
+// earlier in the order, which the wait allows for. Nothing is sent before
+// both sides are ready, so no two tests share a peer's link capacity.
 func (l *link) throughputTest() {
 	r := l.r
 	testTime := 2*(r.cfg.Duration+r.cfg.Drain) + 2*time.Second
-	ready := barrierWait{step: stepTestReady, timeout: r.stepTimeout() + time.Duration(l.pairsAhead())*testTime}
-	if missed := r.barrier([]*link{l}, ready); len(missed) > 0 {
-		l.fail(ready.errFor(l))
+	ready := barrierWait{step: stepTestReady, timeout: r.cfg.StepTimeout + r.setupTime() + time.Duration(l.pairsAhead())*testTime}
+	if !l.barrier(ready) {
 		return
 	}
 	first := r.id < l.peerID
@@ -123,12 +103,10 @@ func (l *link) throughput(step uint64, weSend bool) bool {
 	if weSend {
 		sent = l.sendData()
 	}
-	w := barrierWait{step: step, value: sent, timeout: r.cfg.Duration + r.cfg.StepTimeout}
-	if missed := r.barrier([]*link{l}, w); len(missed) > 0 {
-		l.fail(w.errFor(l))
+	if !l.barrier(barrierWait{step: step, value: sent, timeout: r.cfg.Duration + r.cfg.StepTimeout}) {
 		return false
 	}
-	r.pump(r.cfg.Drain, 0, nil, never)
+	l.pump(r.cfg.Drain, 0, nil, never)
 	if !weSend {
 		l.recordRx(int64(l.peerValue[step]))
 	}
@@ -145,7 +123,7 @@ func (l *link) sendData() uint64 {
 		Body: make([]byte, size-wire.HeaderLen)}.Append(nil)
 	var sent uint64
 	start := time.Now()
-	r.pump(r.cfg.Duration+time.Second, time.Millisecond,
+	l.pump(r.cfg.Duration+time.Second, time.Millisecond,
 		func() {
 			due := uint64(math.Min(time.Since(start).Seconds(), r.cfg.Duration.Seconds()) * pps)
 			for ; sent < due; sent++ {

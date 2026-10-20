@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"p2ptestbed/p2p/internal/direct"
@@ -12,7 +13,9 @@ import (
 )
 
 // link is this peer's side of the link with one other member of the room.
-// Only the main loop touches it, except rx, which the readers count.
+// Its own goroutine (run) takes it through every step, so a slow or dead
+// link holds up only itself. Only that goroutine touches it, except rx,
+// which the readers count, and left, which the main loop sets.
 type link struct {
 	r       *runner
 	peerID  uint64
@@ -21,9 +24,14 @@ type link struct {
 	remote  netip.AddrPort // where its traffic goes; updated by learn
 	res     LinkResult
 
-	err     error // the link failed; its row carries the error
-	stopped bool  // the link ended early with a result (no punch, no hop)
-	left    bool  // the rendezvous said the member left
+	in     chan inbound  // the member's packets, routed here by deliver
+	pinged chan struct{} // to the main loop: our pings are over (or the link ended)
+	turn   chan struct{} // the main loop: our throughput test may start
+	tested chan struct{} // to the main loop: our test is over (or skipped)
+
+	err     error       // the link failed; its row carries the error
+	stopped bool        // the link ended early with a result (no punch, no hop)
+	left    atomic.Bool // the rendezvous said the member left
 
 	gotAck bool
 	ackAt  time.Duration
@@ -41,28 +49,102 @@ type link struct {
 
 func newLink(r *runner, in wire.Intro, at time.Duration) *link {
 	l := &link{r: r, peerID: in.PeerID, rdvAddr: in.Peer, remote: in.Peer,
-		rdvKey: append([]byte(nil), in.PeerKey...), rtts: map[uint64]float64{}, barrierState: newBarrierState()}
+		rdvKey: append([]byte(nil), in.PeerKey...), rtts: map[uint64]float64{}, barrierState: newBarrierState(),
+		in: make(chan inbound, 1024), pinged: make(chan struct{}, 1), turn: make(chan struct{}, 1), tested: make(chan struct{}, 1)}
 	l.res.PeerID = idString(in.PeerID)
 	l.res.RendezvousMs = ptr(ms(at))
 	l.res.PeerRdvAddr = ptr(in.Peer.String())
 	return l
 }
 
-// testOrder is the order of our throughput tests: active links by peer ID,
-// which is also the order of their pairs sorted by (lower ID, higher ID).
-// Every member walks its pairs in that one global order, so no two members
-// ever wait on each other in a cycle.
-func (r *runner) testOrder() []*link { return r.active() }
+// run takes the link through its steps, then waits for its turn at the
+// throughput test, then keeps answering the member until the run ends.
+func (l *link) run() {
+	defer l.r.wg.Done()
+	if l.connect() && l.r.cfg.Pings > 0 {
+		l.ping()
+	}
+	l.pinged <- struct{}{}
+	l.awaitTurn()
+	if l.usable() && l.r.cfg.RateMbit > 0 {
+		l.throughputTest()
+	}
+	l.finish()
+	l.tested <- struct{}{}
+	l.serve()
+}
 
-// active returns the links still taking part, sorted by peer ID.
-func (r *runner) active() []*link {
-	var ls []*link
-	for _, l := range r.sortedLinks() {
-		if l.err == nil && !l.stopped {
-			ls = append(ls, l)
+// connect runs steps 3 and, in direct mode, the direct channel's setup.
+func (l *link) connect() bool {
+	if !l.punch() || !l.barrier(barrierWait{step: stepConnected, timeout: l.r.cfg.StepTimeout}) {
+		return false
+	}
+	if l.r.cfg.Direct != nil && !l.startDirect() {
+		return false
+	}
+	l.res.ReadyMs = ptr(ms(time.Since(l.r.t0)))
+	return true
+}
+
+func (l *link) usable() bool { return l.err == nil && !l.stopped }
+
+func (l *link) awaitTurn() {
+	for {
+		select {
+		case <-l.turn:
+			return
+		case m := <-l.in:
+			l.handle(m)
 		}
 	}
-	return ls
+}
+
+// serve answers the member, which may still be finishing a step.
+func (l *link) serve() {
+	for {
+		select {
+		case <-l.r.done:
+			return
+		case m := <-l.in:
+			l.handle(m)
+		}
+	}
+}
+
+// testOrder is the order of our throughput tests: links by peer ID, which
+// is also the order of their pairs sorted by (lower ID, higher ID). Every
+// member walks its pairs in that one global order, so no two members ever
+// wait on each other in a cycle.
+func (r *runner) testOrder() []*link { return r.sortedLinks() }
+
+// runTests gives each link its throughput turn in testOrder, one at a time,
+// so no two tests share this peer's link capacity. The tests start once
+// every link's pings are over, so no ping is measured under a test's load.
+func (r *runner) runTests() {
+	order := r.testOrder()
+	for _, l := range order {
+		r.waitFor(l.pinged)
+	}
+	for _, l := range order {
+		l.turn <- struct{}{}
+		r.waitFor(l.tested)
+	}
+}
+
+// waitFor handles the servers' packets until c fires.
+func (r *runner) waitFor(c <-chan struct{}) {
+	for {
+		select {
+		case <-c:
+			return
+		case m, ok := <-r.in:
+			if !ok {
+				<-c
+				return
+			}
+			r.handle(m)
+		}
+	}
 }
 
 type pair struct{ lo, hi uint64 }

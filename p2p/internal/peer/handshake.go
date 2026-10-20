@@ -10,28 +10,19 @@ import (
 	"p2ptestbed/p2p/internal/wire"
 )
 
-// handshakeAll runs Noise over the punched socket with every member at
-// once: in each pair the lower static key initiates; both sides resend
-// their last message until done, and answer the member's messages from
-// onHandshake in whatever step they are. The prologue binds the handshake
-// to this trial. A link whose handshake fails carries the error in its row.
-func (r *runner) handshakeAll() {
-	for _, l := range r.active() {
-		if err := l.startHandshake(); err != nil {
-			l.fail(fmt.Errorf("noise handshake: %w", err))
-		}
+// handshake runs Noise with the member over the punched socket: in each
+// pair the lower static key initiates; both sides resend their last message
+// until done, and answer the member's messages from onHandshake in whatever
+// step they are. The prologue binds the handshake to this trial. A failed
+// handshake carries its error in the link's row.
+func (l *link) handshake() bool {
+	if err := l.startHandshake(); err != nil {
+		l.fail(fmt.Errorf("noise handshake: %w", err))
+		return false
 	}
-	ls, timeout := r.active(), r.handshakeTimeout()
-	r.pump(timeout, r.cfg.PunchInterval,
-		func() {
-			for _, l := range ls {
-				l.resendHandshake()
-			}
-		},
-		func() bool { return allLinks(ls, (*link).handshakeOver) })
-	for _, l := range ls {
-		l.finishHandshake(timeout)
-	}
+	timeout := l.r.handshakeTimeout()
+	l.pump(timeout, l.r.cfg.PunchInterval, l.resendHandshake, l.handshakeOver)
+	return l.finishHandshake(timeout)
 }
 
 func (r *runner) handshakeTimeout() time.Duration {
@@ -56,7 +47,7 @@ func (l *link) startHandshake() error {
 
 func (l *link) handshakeOver() bool { return l.hs.Done() || l.hs.Failed() != nil }
 
-func (l *link) finishHandshake(timeout time.Duration) {
+func (l *link) finishHandshake(timeout time.Duration) bool {
 	switch {
 	case l.hs.Failed() != nil:
 		l.fail(fmt.Errorf("noise handshake: %w", l.hs.Failed()))
@@ -65,7 +56,9 @@ func (l *link) finishHandshake(timeout time.Duration) {
 	default:
 		l.noteHandshakeDone(time.Since(l.r.t0)) // already noted, unless it finished outside onHandshake
 		l.logf("handshake: %s done in %.1f ms", l.r.cfg.Direct.Noise, *l.res.HandshakeMs)
+		return true
 	}
+	return false
 }
 
 func (l *link) newHandshake() (*noise.Handshake, error) {

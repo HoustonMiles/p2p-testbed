@@ -57,6 +57,7 @@ type LinkResult struct {
 	PunchMs         *float64 `json:"punch_ms"` // start of punching to first PunchAck
 	PunchesSent     int      `json:"punches_sent"`
 	PunchesRecv     int      `json:"punches_recv"`
+	ReadyMs         *float64 `json:"ready_ms"` // start to the link being usable: punched, and in direct mode hopping both ways
 
 	PingsSent int       `json:"pings_sent"`
 	PingsRecv int       `json:"pings_recv"`

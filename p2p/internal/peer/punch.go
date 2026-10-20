@@ -7,25 +7,22 @@ import (
 	"p2ptestbed/p2p/internal/wire"
 )
 
-// punchAll sends Punch to every member until each answers with a PunchAck.
+// punch sends Punch to the member until it answers with a PunchAck.
 // Behind an endpoint-dependent NAT a member answers from another address
 // than the rendezvous saw; learn switches to it. A member that never
 // answers is a result (punched = false), not an error.
-func (r *runner) punchAll() {
-	ls, start := r.active(), time.Since(r.t0)
-	r.pump(r.cfg.PunchTimeout, r.cfg.PunchInterval,
+func (l *link) punch() bool {
+	start := time.Since(l.r.t0)
+	l.pump(l.r.cfg.PunchTimeout, l.r.cfg.PunchInterval,
 		func() {
-			for _, l := range ls {
-				if !l.gotAck {
-					l.res.PunchesSent++
-					r.sendTo(l.remote, wire.Punch, uint64(l.res.PunchesSent), nil)
-				}
+			if !l.gotAck {
+				l.res.PunchesSent++
+				l.r.sendTo(l.remote, wire.Punch, uint64(l.res.PunchesSent), nil)
 			}
 		},
-		func() bool { return allLinks(ls, func(l *link) bool { return l.gotAck }) })
-	for _, l := range ls {
-		l.finishPunch(start)
-	}
+		func() bool { return l.gotAck })
+	l.finishPunch(start)
+	return l.gotAck
 }
 
 func (l *link) finishPunch(start time.Duration) {
@@ -59,13 +56,4 @@ func (l *link) onPunchAck(m inbound) {
 	if !l.gotAck {
 		l.gotAck, l.ackAt = true, m.at
 	}
-}
-
-func allLinks(ls []*link, ok func(*link) bool) bool {
-	for _, l := range ls {
-		if !ok(l) {
-			return false
-		}
-	}
-	return true
 }

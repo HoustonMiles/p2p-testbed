@@ -117,58 +117,58 @@ func TestLoopbackMemberLeaves(t *testing.T) {
 	}
 }
 
-// A link that never punches keeps both its peers punching for the whole
-// PunchTimeout; b, whose links all punched at once, must wait for them at
-// the next barrier instead of giving up on both. Seen in the testbed: a
-// symmetric NAT's members failed their good links at random.
+// A link that never punches: a and c punch each other for the whole
+// PunchTimeout, but their links with b, and b itself, go on at once.
 func TestLoopbackLinkNeverPunches(t *testing.T) {
 	addr := map[string]netip.Addr{"a": netip.MustParseAddr("127.0.0.2"), "c": netip.MustParseAddr("127.0.0.4")}
 	results := runRoom(t, []string{"a", "b", "c"}, Config{StepTimeout: time.Second}, func(c *Config) {
-		c.PunchTimeout = 2 * time.Second
+		c.PunchTimeout = 3 * time.Second
 		c.unreachable = addr[map[string]string{"a": "c", "c": "a"}[c.Name]]
 	})
-	byID := map[string]string{}
-	for name, rows := range results {
-		byID[rows[0].ID] = name
-	}
-	for name, rows := range results {
-		for _, r := range rows {
-			member := byID[r.PeerID]
-			if pair := name + "->" + member; pair == "a->c" || pair == "c->a" {
-				if r.Punched || r.Error != "" {
-					t.Errorf("%s: punched %v, error %q; want a result without a punch", pair, r.Punched, r.Error)
-				}
-			} else {
-				checkRow(t, pair, r)
-			}
+	checkOneBadLink(t, results, func(pair string, r *Result) {
+		if r.Punched || r.Error != "" {
+			t.Errorf("%s: punched %v, error %q; want a result without a punch", pair, r.Punched, r.Error)
 		}
-	}
+	})
 }
 
-// The same after the handshake: a does not trust c's key, so c waits out
-// its handshake timeout on that link while b, done with both, waits for c.
+// The same one step later: a does not trust c's key, so c waits out its
+// handshake timeout on that link while the links with b hop at once.
 func TestLoopbackHandshakeNeverEnds(t *testing.T) {
 	names := []string{"a", "b", "c"}
 	cfg := directConfig("kk", "file")
-	cfg.StepTimeout = time.Second
+	cfg.StepTimeout, cfg.Direct.HandshakeTimeout = time.Second, 3*time.Second
 	results := runRoom(t, names, cfg, trustRoom(names), func(c *Config) {
 		if c.Name == "a" {
 			c.Direct.TrustedKeys = [][]byte{testKeys["b"].Public}
 		}
 	})
+	checkOneBadLink(t, results, func(pair string, r *Result) {
+		if !strings.Contains(r.Error, "handshake") {
+			t.Errorf("%s: error %q, want a failed handshake", pair, r.Error)
+		}
+	})
+}
+
+// checkOneBadLink checks a room of a, b and c where only the a-c link is
+// bad (its two rows go to bad): every other link is clean, and was ready
+// well within the bad link's 3 s timeout, so nothing waited for it.
+func checkOneBadLink(t *testing.T, results map[string][]*Result, bad func(pair string, r *Result)) {
+	t.Helper()
 	byID := map[string]string{}
 	for name, rows := range results {
 		byID[rows[0].ID] = name
 	}
 	for name, rows := range results {
 		for _, r := range rows {
-			member := byID[r.PeerID]
-			if pair := name + "->" + member; pair == "a->c" || pair == "c->a" {
-				if !strings.Contains(r.Error, "handshake") {
-					t.Errorf("%s: error %q, want a failed handshake", pair, r.Error)
-				}
-			} else if checkRow(t, pair, r); !r.HopConnected {
-				t.Errorf("%s: not hop connected", pair)
+			pair := name + "->" + byID[r.PeerID]
+			switch {
+			case pair == "a->c" || pair == "c->a":
+				bad(pair, r)
+			case r.ReadyMs != nil && *r.ReadyMs > 1500:
+				t.Errorf("%s: ready at %.0f ms, held up by the bad link", pair, *r.ReadyMs)
+			default:
+				checkRow(t, pair, r) // also: ready at all
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -186,11 +187,14 @@ func checkRow(t *testing.T, name string, r *Result) {
 	if r.Error != "" {
 		t.Errorf("%s: %s", name, r.Error)
 	}
-	if !r.Punched || r.PunchMs == nil {
-		t.Errorf("%s: not punched", name)
+	if !r.Punched || r.PunchMs == nil || r.ReadyMs == nil {
+		t.Errorf("%s: not punched, or never ready", name)
+	}
+	if r.Direct && !r.HopConnected {
+		t.Errorf("%s: not hop connected", name)
 	}
 	if r.STUNAddr == nil || *r.STUNAddr != r.Local || r.MappingVaries == nil || *r.MappingVaries {
-		t.Errorf("%s: stun %v, local %v", name, r.STUNAddr, r.Local)
+		t.Errorf("%s: stun %s, local %v", name, show(r.STUNAddr), r.Local)
 	}
 	if r.PeerAddrChanged == nil || *r.PeerAddrChanged {
 		t.Errorf("%s: peer address changed without a NAT", name)
@@ -202,10 +206,10 @@ func checkRow(t *testing.T, name string, r *Result) {
 		t.Errorf("%s: sent nothing", name)
 	}
 	if r.RxPackets == nil || r.RxPeerSent == nil || *r.RxPackets != *r.RxPeerSent || *r.RxLoss != 0 {
-		t.Errorf("%s: received %v of %v", name, r.RxPackets, r.RxPeerSent)
+		t.Errorf("%s: received %s of %s", name, show(r.RxPackets), show(r.RxPeerSent))
 	}
 	if r.RxMbit == nil || *r.RxMbit < 3 || *r.RxMbit > 7 {
-		t.Errorf("%s: rx rate %v, want about 5 Mbit/s", name, r.RxMbit)
+		t.Errorf("%s: rx rate %s, want about 5 Mbit/s", name, show(r.RxMbit))
 	}
 }
 
@@ -217,4 +221,12 @@ func checkResults(t *testing.T, results map[string]*Result) {
 	if *results["a"].TxPackets != *results["b"].RxPeerSent {
 		t.Error("b did not learn how many packets a sent")
 	}
+}
+
+// show prints a result column for a failure message: its value, or none.
+func show[T any](v *T) string {
+	if v == nil {
+		return "none"
+	}
+	return fmt.Sprint(*v)
 }
