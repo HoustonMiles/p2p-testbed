@@ -1,0 +1,40 @@
+# =============================================================================
+# Relay path (Experiment B, third arm): what does the relayed baseline cost?
+#
+# The same configurations as punch_path and direct_path (3 distances, 50
+# Mbit/s links, port-restricted on both sides), with every packet through
+# the TURN relay: Noise handshake through the relay, then pings and 60
+# Mbit/s per direction, sealed, with no hopping. The relay adds no delay of
+# its own here (see relay_detour), so this measures what relaying costs by
+# itself: the relay's processing and ChannelData's 4 bytes per packet.
+#
+# Same settings, same configuration IDs, so compare lines them up:
+#   uv run python -m p2prunner compare results/direct_path/<run> results/relay_path/<run>
+#   uv run python -m p2prunner compare results/punch_path/<run>  results/relay_path/<run>
+#
+#   uv run python -m p2prunner run experiments/relay_path.toml
+# =============================================================================
+
+name = "relay_path"
+description = "Peer-to-peer RTT and throughput through the TURN relay with Noise, 3 distances, 50 Mbit/s links."
+trial = "command"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 90
+est_trial_s = 16
+cmd_a = "punch -name a -room $seed -quiet -relay -direct -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+cmd_b = "punch -name b -room $seed -quiet -relay -direct -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+
+[matrix]
+net_profile = ["local", "coast", "transatlantic"]
+uplink_mbit = ["50"]
+downlink_mbit = ["50"]
+
+[[matrix.pairing]]
+name = "realistic"
+nat_a = "port_restricted"
+nat_b = "port_restricted"

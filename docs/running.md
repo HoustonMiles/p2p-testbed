@@ -66,6 +66,9 @@ before `peers` existed, so older results still match.
 | `hop_matrix_oneway` | The 6 `hop_matrix` pairings with one symmetric side that can still punch (~20 min) |
 | `direct_path` | Experiment B: `punch_path` through the direct channel, realistic pairing x 3 distances (~10 min) |
 | `direct_path_overlap` | `direct_path` with `-hop-overlap 400ms`, the test that found the overlap problem (~10 min) |
+| `relay_matrix` | Every NAT pairing with and without CGNAT, through the TURN relay: does the relay connect all of them? (~50 min) |
+| `relay_path` | Experiment B's third arm: `direct_path`'s configurations through the relay with Noise, no relay delay (~10 min) |
+| `relay_detour` | `relay_path` on the coast profile with the relay 0, 10 and 40 ms out of the way (~10 min) |
 | `mesh_scale` | Full mesh of direct links for 2, 4, 8 and 16 peers, all starting at once, realistic (all port-restricted) and mixed NATs (~30 min) |
 | `mesh_join` | Peers joining a running mesh 0, 100, 500 and 2000 ms apart, 8 and 16 peers, realistic and mixed NATs: worst case against best case (~35 min) |
 
@@ -147,12 +150,20 @@ NixOS setup):
 # Experiment A: hop success per pairing; later runs replace earlier ones per configuration
 uv run python -m p2prunner hops results/hop_matrix/<run> results/hop_matrix_oneway/<run>
 
-# any two runs of the same configurations, e.g. Experiment B: raw vs direct
+# any two runs of the same configurations, e.g. Experiment B: raw vs direct vs relayed
 uv run python -m p2prunner compare results/punch_path/<run> results/direct_path/<run>
+uv run python -m p2prunner compare results/direct_path/<run> results/relay_path/<run>
+
+# configurations that differ only in some settings: --ignore lines them up
+uv run python -m p2prunner compare results/direct_path/<run> results/relay_detour/<run> --ignore relay_delay_ms
 
 # mesh trials: pairs usable, share as predicted, full meshes, time until ready
 uv run python -m p2prunner mesh results/mesh_scale/<run>
 ```
+
+`compare` counts a trial when its path was up: both sides punched (and
+hop-connected in direct mode), or, relayed, both sides ready through the
+relay.
 
 Replace `<run>` with the run's folder name (e.g. `20261012-132335`); typed
 literally, bash reads the angle brackets as redirection. Configurations are

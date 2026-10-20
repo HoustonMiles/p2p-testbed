@@ -116,14 +116,33 @@ class CompareTest(unittest.TestCase):
         self.assertIn("1>1", out)
         self.assertIn("48.00 > 47.00", out)
 
+    def test_relayed_trials_count_when_both_sides_are_ready(self):
+        base = self.folders.write("base", [trial("c00-aaa111", **sides(punched=True, direct=True, hop_connected=True,
+                                                                      rtt_ms_p50=70.0))])
+        new = self.folders.write("new", [
+            trial("c00-aaa111", **sides(relayed=True, direct=True, ready_ms=300.0, rtt_ms_p50=71.0)),
+            trial("c00-aaa111", **sides(relayed=True, direct=True, ready_ms=None, rtt_ms_p50=900.0)),
+        ])
+        out = report(reports.compare, base, [new])
+        self.assertIn("1>1", out)
+        self.assertIn("70.00 > 71.00", out)
+
+    def test_ignore_lines_up_configurations_that_differ_in_one_setting(self):
+        base = self.folders.write("base", [trial("c00-aaa111", **sides(punched=True, rtt_ms_p50=70.0))])
+        new = self.folders.write("new", [
+            trial("c00-bbb222", relay_delay_ms="10", **sides(punched=True, rtt_ms_p50=90.0)),
+            trial("c01-ccc333", relay_delay_ms="40", **sides(punched=True, rtt_ms_p50=150.0)),
+        ])
+        self.assertEqual(report_code(reports.compare, base, [new]), 1)  # nothing in common by ID
+        out = report(reports.compare, base, [new], ("relay_delay_ms",))
+        self.assertIn("relay_delay_ms=10", out)
+        self.assertIn("70.00 > 150.00", out)
+
     def test_no_common_configurations(self):
         base = self.folders.write("base", [trial("c00-aaa111")])
         new = self.folders.write("new", [trial("c00-bbb222")])
         self.assertEqual(report_code(reports.compare, base, [new]), 1)
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class MeshReportTest(unittest.TestCase):
@@ -159,3 +178,7 @@ class MeshReportTest(unittest.TestCase):
                           full.get("!")), ("2", "1.00", "500.00", "600.00", "300.00", None))
         self.assertEqual((partial["ok"], partial["usable"], partial["as_predicted"], partial["full"], partial["!"]),
                          ("0.000", "4.00", "0.833", "0.000", "!"))
+
+
+if __name__ == "__main__":
+    unittest.main()

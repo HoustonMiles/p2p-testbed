@@ -9,14 +9,22 @@ in any experiment, so runs of different experiments line up.
 
 from __future__ import annotations
 
+import json
 import statistics
 from pathlib import Path
 
+from p2prunner.experiment import is_factor
 from p2prunner.store import ResultStore
 
 
-def config_key(row: dict) -> str:
-    return row["config_id"].rsplit("-", 1)[-1]
+def config_key(row: dict, ignore: tuple[str, ...] = ()) -> str:
+    """The configuration's key across experiments. With ignore, its testbed
+    settings without those, so configurations that differ only in them
+    (e.g. relay_delay_ms) line up."""
+    if not ignore:
+        return row["config_id"].rsplit("-", 1)[-1]
+    settings = {k: v for k, v in row.items() if is_factor(k) and k not in ignore}
+    return json.dumps(settings, sort_keys=True)
 
 
 def load_runs(paths: list[str | Path]) -> list[dict]:
@@ -37,11 +45,11 @@ def load_run(path: str | Path) -> list[dict]:
     return store.rows()
 
 
-def by_config(rows: list[dict]) -> dict[str, list[dict]]:
+def by_config(rows: list[dict], ignore: tuple[str, ...] = ()) -> dict[str, list[dict]]:
     """Trials grouped by configuration key, in first-seen order."""
     groups: dict[str, list[dict]] = {}
     for r in rows:
-        groups.setdefault(config_key(r), []).append(r)
+        groups.setdefault(config_key(r, ignore), []).append(r)
     return groups
 
 

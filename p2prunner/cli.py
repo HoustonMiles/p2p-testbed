@@ -373,7 +373,7 @@ def cmd_hops(args) -> int:
 
 
 def cmd_compare(args) -> int:
-    return reports.compare(args.base, args.new)
+    return reports.compare(args.base, args.new, tuple(args.ignore))
 
 
 def cmd_mesh(args) -> int:
@@ -442,6 +442,8 @@ def add_report_commands(sub) -> None:
     c = sub.add_parser("compare", help="two runs of the same configurations side by side")
     c.add_argument("base", metavar="BASE", help="results folder of the baseline, e.g. punch_path")
     c.add_argument("new", nargs="+", metavar="NEW", help="results folder(s) to compare against it")
+    c.add_argument("--ignore", action="append", default=[], metavar="SETTING",
+                   help="match configurations that differ only in this setting, e.g. relay_delay_ms (repeatable)")
     c.set_defaults(func=cmd_compare)
 
     m = sub.add_parser("mesh", help="mesh trials: how much of each mesh came up, as predicted, how fast")
