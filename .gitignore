@@ -20,3 +20,7 @@ keys/
 
 # Stacks written by the runner (p2prunner up / run); see p2prunner/compose.py
 .testbed/
+
+# deliveries
+*.zip
+COMMIT_MSG.txt
