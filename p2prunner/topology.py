@@ -114,9 +114,9 @@ class Peer:
 
 def wan_neighbours(n: int, cgn_count: int) -> int:
     """ARP entries the WAN can need: every host on it (each peer's router or
-    CGN, and the two services) may talk to every other. The kernel counts
+    CGN, and the three services) may talk to every other. The kernel counts
     them for all containers together."""
-    hosts = n + cgn_count + 2
+    hosts = n + cgn_count + 3
     return hosts * (hosts - 1)
 
 

@@ -23,7 +23,7 @@ class ComposeTest(unittest.TestCase):
     def test_n_peers_with_cgns_only_where_asked(self):
         text = compose.render(4, {"b", "d"})
         self.assertEqual(services(text), ["peer-a", "nat-a", "peer-b", "nat-b", "cgn-b", "peer-c", "nat-c",
-                                          "peer-d", "nat-d", "cgn-d", "stun", "rendezvous"])
+                                          "peer-d", "nat-d", "cgn-d", "stun", "rendezvous", "relay"])
         self.assertNotIn("carrier_a:", text)  # a has no carrier network (the header diagram still names one)
         self.assertIn("carrier_d:", text)
 
@@ -44,7 +44,7 @@ class ComposeTest(unittest.TestCase):
         except ImportError:
             self.skipTest("PyYAML not installed; the runner itself does not need it")
         doc = yaml.safe_load(compose.render(30, {"z", "ad"}))
-        self.assertEqual(len(doc["services"]), 30 * 2 + 2 + 2)
+        self.assertEqual(len(doc["services"]), 30 * 2 + 2 + 3)
         self.assertEqual(doc["services"]["nat-ad"]["networks"]["wan"]["ipv4_address"], "198.18.30.10")
         self.assertEqual(doc["services"]["cgn-ad"]["networks"]["wan"]["ipv4_address"], "198.18.30.11")
 

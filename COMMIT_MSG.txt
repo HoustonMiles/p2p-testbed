@@ -1,33 +1,35 @@
-Mesh step 4c: peers join a running mesh (the best case)
+Relay step 5a: TURN relay in the testbed, and a TURN client
 
-Until now a peer waited at the rendezvous until every member was there,
-and only then started its links, so however far apart peers started,
-they all punched together. Now a mesh can grow while members arrive.
+The relay baseline's first half: the relay itself, and the client code a
+peer will use to reach it (step 5b wires it into punch).
 
-- peer: each link starts the moment the rendezvous introduces its member
-  (onPeerInfo), up to the room's size. Members that arrive later link
-  with those already running, and those link with them. Throughput
-  tests still wait until the room is complete. Once it is full, or after
-  -rendezvous-timeout, later members are ignored, as before.
-- mesh trial: stagger_ms spaces the starts (a first, then b, c, ... each
-  stagger_ms later); 0, the default, is the all-at-once worst case. The
-  peers wait at the rendezvous as long as the spacing needs.
-  New columns join_ms_p50 / join_ms_max: from a peer's start until its
-  usable links with the members already running were ready at both ends.
-- Experiments: a key of [params] may be a matrix key, so each
-  configuration runs its trials with its own value (a result column, not
-  a testbed setting). Configurations without one keep their IDs (all 120
-  unchanged).
-- p2prunner mesh: new column join_p50_ms; configurations in the
-  experiment's order.
-- experiments/mesh_join.toml: 8 and 16 peers, 0 / 100 / 500 / 2000 ms
-  apart, realistic and mixed NATs, coast profile.
+- testbed: a relay service, coturn as a TURN relay (RFC 8656) at the
+  reserved 198.18.0.102, from the same image as stun but its own
+  container. Long-term credentials testbed / testbed, realm p2p-testbed;
+  relayed ports 49152-65535; UDP only. RELAY_DELAY_MS (default 0) delays
+  what the relay sends, to model a relay out of the way (2 x the delay on
+  a relayed round trip); a new experiment setting that is kept out of
+  older configurations' IDs (all 120 unchanged).
+- p2p/internal/stun: the message format behind the Binding helpers
+  (Message, Encode, Decode, XOR addresses) and MESSAGE-INTEGRITY
+  (AppendIntegrity, CheckIntegrity), which TURN builds on.
+- p2p/internal/turn: the client side, socket-free like stun: Allocate with
+  the long-term 401 -> realm/nonce -> signed retry, stale nonce (438),
+  CreatePermission, ChannelBind, Refresh, ChannelData framing.
+  Success responses must carry our MESSAGE-INTEGRITY; a 401 to signed
+  credentials does not retry. No new dependencies.
+- p2prunner: smoke checks that a peer reaches the relay through its NAT;
+  preflight lists the relay; the ARP-table check counts it.
+- NAT checks (verify and the start of each configuration) test a peer once
+  more when its test got no reply at all ("none"), instead of restarting
+  the whole configuration; a wrong answer still fails at once.
+- docs: testbed.md (relay, RELAY_DELAY_MS, address), design.md, testing.md,
+  results.md (also the mesh_join coast results: about 425 ms join time in
+  every configuration, six round trips).
 
-Sandbox run (no netem, 2 runs per configuration): every pair did as
-RFC 4787 predicts at every spacing; realistic meshes complete. Median
-join time at 16 peers: 317 ms all at once, 187 ms 100 ms apart, 169 ms
-at 500 ms or more; at 8 peers about 160 ms at any spacing.
-
-Tests: a member joining 1.5 s late, with the first two linked before it
-comes (mutation-checked against waiting for the full room); spaced
-commands and join times; [params] keys in the matrix.
+Tests: MESSAGE-INTEGRITY against the RFC 5769 sample request; the TURN
+login, forged and wrong-credential replies, stale nonce, channel binding
+and ChannelData against a fake server; a fuzz target for every reply;
+a live relay-to-relay test against coturn (TURN_SERVER=...), run from the
+host and from behind a port-restricted NAT; the relay smoke check; the
+NAT-check retry (mutation-checked).

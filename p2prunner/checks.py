@@ -16,10 +16,11 @@ import re
 import subprocess
 
 from p2prunner import topology
+from p2prunner.topology import RELAY_IP
 from p2prunner.experiment import Config, resolve
 from p2prunner.testbed import Testbed, TestbedError
 from p2prunner.nat import expected_behaviour
-from p2prunner.trials import STUN_IP, measure_behaviour
+from p2prunner.trials import STUN_IP, measure_all
 
 TYPES = ("full_cone", "restricted", "port_restricted", "symmetric")
 
@@ -54,7 +55,7 @@ def preflight(tb: Testbed, need_running: bool = True) -> str | None:
     if not need_running:
         return None
     running = tb.services()
-    missing = [s for s in ("stun", "peer-a", "nat-a", "peer-b", "nat-b") if s not in running]
+    missing = [s for s in ("stun", "relay", "peer-a", "nat-a", "peer-b", "nat-b") if s not in running]
     missing += [f"nat-{p}" for p in tb.running_peers() if f"nat-{p}" not in running]
     if missing:
         return (f"Not running: {', '.join(missing)}. Start the testbed first:\n"
@@ -86,7 +87,8 @@ def describe(cfg: Config, name: str) -> str:
 # =============================================================================
 def smoke(tb: Testbed) -> int:
     """For each peer: it reaches the WAN, STUN sees the expected public IP
-    (so NAT happened), and a WAN host cannot route around the NAT."""
+    (so NAT happened), and a WAN host cannot route around the NAT. Then the
+    relay: peer a reaches it, and it too sees a's public IP."""
     cfg = running_config(tb)
     report = Report()
     for p in cfg.peers:
@@ -94,19 +96,36 @@ def smoke(tb: Testbed) -> int:
         public = p.public_ip(cfg.factors[f"upstream_{p.name}"] == "cgnat")
         check_stun(tb, p.name, public, report)
         check_no_bypass(tb, p, public, report)
+    print("Relay")
+    check_relay(tb, cfg.peers[0].public_ip(cfg.factors["upstream_a"] == "cgnat"), report)
     return report.finish("All checks passed.")
 
 
 def check_stun(tb: Testbed, name: str, public: str, report: Report) -> None:
-    # The client goes on to RFC 5780 requests a filtering NAT may rightly
-    # block, so its run time is capped and only the first reply is read.
-    out = tb.sh(f"peer-{name}", f"timeout 3 turnutils_stunclient {STUN_IP} 2>/dev/null").stdout
-    m = re.search(r"UDP reflexive addr: *([0-9.]+):([0-9]+)", out)
-    if not m:
+    seen = seen_as(tb, name, STUN_IP)
+    if seen is None:
         report.check(False, f"peer-{name} got no STUN reply")
         return
-    seen = f"{m.group(1)}:{m.group(2)}"
-    report.check(m.group(1) == public, f"STUN sees peer-{name} as {seen} (expected IP {public})")
+    report.check(seen.split(":")[0] == public, f"STUN sees peer-{name} as {seen} (expected IP {public})")
+
+
+def check_relay(tb: Testbed, public_a: str, report: Report) -> None:
+    """The relay answers STUN without a login, so the same request shows
+    that peer a reaches it through its NATs."""
+    seen = seen_as(tb, "a", RELAY_IP)
+    if seen is None:
+        report.check(False, f"peer-a got no reply from the relay ({RELAY_IP})")
+        return
+    report.check(seen.split(":")[0] == public_a, f"the relay sees peer-a as {seen} (expected IP {public_a})")
+
+
+def seen_as(tb: Testbed, name: str, server: str) -> str | None:
+    """The peer's address as a STUN server sees it, or None if it got no
+    reply. The client goes on to RFC 5780 requests a filtering NAT may
+    rightly block, so its run time is capped and only the first reply is read."""
+    out = tb.sh(f"peer-{name}", f"timeout 3 turnutils_stunclient {server} 2>/dev/null").stdout
+    m = re.search(r"UDP reflexive addr: *([0-9.]+:[0-9]+)", out)
+    return m.group(1) if m else None
 
 
 def check_no_bypass(tb: Testbed, p: topology.Peer, public: str, report: Report) -> None:
@@ -135,7 +154,7 @@ def verify(tb: Testbed, every_type: bool) -> int:
 def verify_running(tb: Testbed, cfg: Config, report: Report) -> None:
     raw: dict = {}
     names = [p.name for p in cfg.peers]
-    measured = tb.parallel({n: (lambda n=n: measure_behaviour(tb, n, raw)) for n in names})
+    measured = measure_all(tb, names, raw)
     for name in names:
         exp_m, exp_f = expected_behaviour(cfg, name)
         got_m, got_f = measured[name]

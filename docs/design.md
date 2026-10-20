@@ -17,7 +17,9 @@ p2p/
                       hop.go, barrier.go, measure.go, result.go; loopback_test.go and
                       mesh_test.go run whole trials
     rendezvous/       rooms: server.go, and client.go (a member's side)
-    stun/             STUN messages
+    stun/             STUN messages, with MESSAGE-INTEGRITY (the format TURN builds on)
+    turn/             the TURN client: allocation with long-term credentials, permissions,
+                      channels, ChannelData (the relay baseline; used by the peer from step 5b)
     direct/           the port-hopping channel: schedule, hopper, slots, probe, drain, receive
     noise/            Noise handshake, encrypted session, replay window
     identity/         static keys and trusted-key directories

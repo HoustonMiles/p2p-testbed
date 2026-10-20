@@ -29,6 +29,14 @@ class TrialParamsTest(unittest.TestCase):
             expand_matrix({"stagger": [0]}, {"stagger_ms": 0})
 
 
+class LateFactorTest(unittest.TestCase):
+    def test_relay_delay_is_a_testbed_setting_outside_older_ids(self):
+        plain, delayed = expand_matrix({"net_profile": ["coast"]})[0], expand_matrix({"relay_delay_ms": [20]})[0]
+        self.assertNotIn("relay_delay_ms", plain.factors)
+        self.assertEqual((plain.env["RELAY_DELAY_MS"], delayed.env["RELAY_DELAY_MS"]), ("0", "20"))
+        self.assertEqual(delayed.label, "relay_delay_ms=20")
+
+
 class ExpandMatrixTest(unittest.TestCase):
     def test_every_combination(self):
         configs = expand_matrix({

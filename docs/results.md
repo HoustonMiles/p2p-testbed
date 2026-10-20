@@ -26,6 +26,7 @@
 | Mesh step 4b-1: per-link progress. Each link moves through punch, handshake, hop and pings on its own goroutine, so a dead link holds up only itself; new column `ready_ms` | done, tests pass; 8 mixed-NAT peers: all 30 hop-capable links ready within 0.5 s while the dead links punch for 10 s; 32 peers: 992/992 links hop-connected | `p2p/internal/peer/` (`link.go`, `mesh_test.go`) |
 | Mesh step 4b-2: `mesh` trial type (every peer at once), `links.jsonl`, mesh-level columns (pairs usable, as predicted by RFC 4787, time to full mesh), `start_unix_ms`, `p2prunner mesh` report, `mesh_scale` experiment | done, tests pass; in a 4-CPU VM without netem (2 runs per configuration): all 1,240 link ends as RFC 4787 predicts; realistic meshes complete at 2 to 16 peers, time to full mesh about 0.2 / 0.6 / 1.3 s at 4 / 8 / 16 peers | `p2prunner/mesh.py`, `p2prunner/nat.py` |
 | Mesh step 4c: peers join a running mesh (each link starts when its member is introduced); `stagger_ms` spaces the starts; join time per peer (`join_ms_*`); `[params]` keys as matrix keys; `mesh_join` experiment | done, tests pass; in a 4-CPU VM without netem (2 runs per configuration): every pair as predicted at every spacing; median join time at 16 peers 317 ms all at once, 169 ms at 500 ms spacing or more (8 peers: about 160 ms at any spacing) | `p2p/internal/peer/meet.go`, `p2prunner/mesh.py`, `p2prunner/experiment.py` |
+| Relay step 5a: TURN relay in the testbed (coturn at 198.18.0.102, long-term credentials, optional `RELAY_DELAY_MS`); Go TURN client (allocate, permissions, channels, ChannelData; no new dependencies) on a STUN message layer with MESSAGE-INTEGRITY; relay in `smoke`; NAT checks retry a peer that got no reply | done, tests pass; MESSAGE-INTEGRITY checked against the RFC 5769 sample; relay-to-relay through coturn from the host and from behind a port-restricted NAT | `p2p/internal/turn/`, `p2p/internal/stun/message.go`, `testbed/stun/` |
 | Result reports (standard library only) | done | `p2prunner hops`, `p2prunner compare` (`p2prunner/reports.py`) |
 | Tests: Go unit + fuzz tests beside the code, Python `unittest` in `tests/` | done | [testing.md](testing.md) |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
@@ -33,6 +34,7 @@
 | **Result:** punch matrix (raw baseline) | 320/320 trials; 24/32 configurations punch, exactly as RFC 4787 predicts | `results/punch_matrix/20261012-124540` |
 | **Result:** punch path (raw baseline) | 60/60 trials; RTT = profile RTT, link fully used | `results/punch_path/20261012-132335` |
 | **Result:** Experiment A, hop success | 320/320 trials; hopping holds in all 18 configurations where both NATs keep ports, fails in the rest, as the port check predicts | `results/hop_matrix/20261012-104647` + `results/hop_matrix_oneway/20261012-121649` |
+| **Result:** mesh join | 80/80 trials; every pair as RFC 4787 predicts at every size and spacing; join time about 425 ms in every configuration (about six coast round trips), so neither load nor start pattern matters up to 16 peers | `results/mesh_join/20261020-111009` |
 | **Result:** Experiment B, performance cost | 30/30 trials; no latency cost, -2.0% goodput (= Noise overhead), no loss from hopping | `results/direct_path/` (latest run, drain-based close) |
 
 ## Not done
@@ -40,7 +42,7 @@
 | Part | What it is for |
 |---|---|
 | Full mesh, next: per-peer clock offsets in mesh trials, port clashes between a peer's links, a long-running mesh (members leaving and rejoining) | The paper's system is a mesh of pairwise direct links |
-| Relay baseline: coturn as a TURN relay in the testbed (198.18.0.102), `punch -relay`, `relay_path` experiment | The comparison baseline, and the path for pairings that cannot hop |
+| Relay baseline, steps 5b and 5c: `punch -relay` (relayed links for every member of a mesh), `relay_matrix` and `relay_path` experiments | The comparison baseline, and the path for pairings that cannot hop |
 | Handoff Manager | Falls back to the relay when `hop_possible` is false or hopping stops holding |
 | Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |
 | Experiment C | Attack resilience, direct hopping vs relay (`hop_drain_cutoffs`, `hop_unrouted`, `hop_foreign`, `hop_auth_failed` are there for it) |
@@ -158,9 +160,15 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
   (with 8 peers, good links failed at random). Per-link steps remove it: in
   the same 8-peer mesh every usable link was ready within 0.5 s. Time to
   full mesh is only meaningful with per-link steps.
-- Mesh formation, worst against best case (sandbox numbers, to be rerun on
-  the coast profile): every pair did as RFC 4787 predicts whether peers
-  start together or one at a time. Starting together costs join time only
-  from about 16 peers (317 ms median against 169 ms when 500 ms apart).
+- Mesh formation, worst against best case (`mesh_join`, coast profile):
+  every pair did as RFC 4787 predicts whether 8 or 16 peers start together
+  or 2 s apart, and the median join time is about 425 ms in every case:
+  six round trips (introduction, punch, connected barrier, Noise
+  handshake, port check, first hop both ways). Join time is set by the
+  protocol's round trips, not by load; folding the port check into the
+  handshake would save one. (On a 4-CPU VM, 16 peers starting together did
+  slow joins, 317 against 169 ms without netem: load matters only when CPU
+  runs out.) Time to full mesh, all at once: 0.47 s for 8 peers, 0.63 s for
+  16.
 - Find and verify a citation on AI-driven attacks against moving-target
   defenses.

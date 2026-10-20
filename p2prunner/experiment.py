@@ -68,6 +68,13 @@ GLOBAL_FACTORS: dict[str, tuple[str, str]] = {
     "udp_timeout_stream": ("UDP_TIMEOUT_STREAM", "120"),
 }
 
+# Testbed-wide settings added after results existed: a configuration has one
+# in its factors only when the matrix sets it, so every older configuration
+# keeps its ID; its compose variable still always gets a value.
+LATE_FACTORS: dict[str, tuple[str, str]] = {
+    "relay_delay_ms": ("RELAY_DELAY_MS", "0"),   # one-way delay at the relay
+}
+
 # Per-peer settings: nat_c is NAT_C_TYPE, and so on. A default of None means
 # the peer takes the testbed-wide setting unless one is given for it.
 PEER_FACTORS: dict[str, tuple[str, str | None]] = {
@@ -148,6 +155,7 @@ class Config:
         change a configuration by accident; an empty per-peer link setting
         means the testbed-wide one."""
         env = {var: str(self.factors[k]) for k, (var, _) in GLOBAL_FACTORS.items()}
+        env.update({var: str(self.factors.get(k, default)) for k, (var, default) in LATE_FACTORS.items()})
         for p in self.peers:
             for prefix, (var, _) in PEER_FACTORS.items():
                 env[var.format(p.name.upper())] = str(self.factors.get(f"{prefix}_{p.name}", ""))
@@ -245,7 +253,11 @@ def expand_matrix(matrix: dict, params: dict | None = None) -> list[Config]:
 
 def is_param(key: str, params: dict) -> bool:
     """A matrix key that sets one of the experiment's [params], not the testbed."""
-    return key in params and key not in ("peers", "nats") and key not in GLOBAL_FACTORS and not peer_key(key)
+    return key in params and not is_factor(key)
+
+
+def is_factor(key: str) -> bool:
+    return key in ("peers", "nats") or key in GLOBAL_FACTORS or key in LATE_FACTORS or peer_key(key) is not None
 
 
 def axis_options(key: str, values, params: dict) -> list[tuple[dict, dict]]:
@@ -274,10 +286,10 @@ def _check_settings(settings: dict, where: str, params: dict) -> None:
             _check_peers(value, where)
         elif key == "nats":
             _check_nats(value, where)
-        elif key not in GLOBAL_FACTORS and not peer_key(key):
+        elif not is_factor(key):
             raise ValueError(f"{where}: unknown setting '{key}' (known: peers, nats, "
-                             f"{', '.join(GLOBAL_FACTORS)}, {', '.join(p + '_<peer>' for p in PEER_FACTORS)}, "
-                             "or a key of [params])")
+                             f"{', '.join([*GLOBAL_FACTORS, *LATE_FACTORS])}, "
+                             f"{', '.join(p + '_<peer>' for p in PEER_FACTORS)}, or a key of [params])")
         else:
             _check_value(key, value, where)
 

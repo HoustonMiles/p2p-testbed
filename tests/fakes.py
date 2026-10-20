@@ -31,8 +31,9 @@ class FakeTestbed:
         self.cgn = kw.get("cgn", "port_restricted")
         self.public = kw.get("public", {})              # peer -> IP STUN reports
         self.bypass = kw.get("bypass", False)           # WAN host reaches the peer
-        self.behaviour = kw.get("behaviour", {})        # peer -> (mapping, filtering)
+        self.behaviour = kw.get("behaviour", {})        # peer -> (mapping, filtering), or a list of answers in turn
         self.running = kw.get("running", True)
+        self.relay = kw.get("relay", True)              # the relay answers
         self.ups: list = []                             # every reconfiguration, in order
 
     @property
@@ -46,7 +47,7 @@ class FakeTestbed:
     def services(self) -> list[str]:
         if not self.running:
             return ["stun"]
-        return ["stun"] + [f"{kind}-{n}" for n in self.names for kind in ("nat", "peer")]
+        return ["stun", "relay"] + [f"{kind}-{n}" for n in self.names for kind in ("nat", "peer")]
 
     def running_peers(self) -> list[str]:
         return [s.removeprefix("peer-") for s in self.services() if s.startswith("peer-")]
@@ -63,14 +64,20 @@ class FakeTestbed:
             return Done(f"{self.nat[i]} {self.upstream[i]}\n")
         if service.startswith("cgn-"):
             return Done(self.cgn + "\n")
+        if "turnutils_stunclient" in script and topology.RELAY_IP in script and not self.relay:
+            return Done()
         if "turnutils_stunclient" in script:
             return Done(f"0: : IPv4. UDP reflexive addr: {self.public_ip(service.removeprefix('peer-'))}:40000\n")
         raise AssertionError(f"unexpected sh on {service}: {script}")
 
     def exec(self, service, command, timeout=0):
         if "turnutils_natdiscovery" in command:
-            m, f = self.behaviour.get(service.removeprefix("peer-"), ("EI", "APD"))
-            return Done(f"NAT with {NATDISCOVERY[m]} Mapping!\nNAT with {NATDISCOVERY[f]} Filtering!\n")
+            answer = self.behaviour.get(service.removeprefix("peer-"), ("EI", "APD"))
+            if isinstance(answer, list):
+                answer = answer.pop(0) if len(answer) > 1 else answer[0]
+            lines = [f"NAT with {NATDISCOVERY[v]} {kind}!" for v, kind in zip(answer, ("Mapping", "Filtering"))
+                     if v != "none"]  # no reply: natdiscovery prints no verdict
+            return Done("\n".join(lines) + "\n")
         if command[0] == "ip":
             return Done()
         if command[0] == "ping":

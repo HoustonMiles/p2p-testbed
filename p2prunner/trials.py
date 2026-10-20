@@ -93,9 +93,20 @@ def measure_behaviour(tb, side: str, raw: dict) -> tuple[str, str]:
             WORDS.get(f.group(1), "?") if f else "none")
 
 
+def measure_all(tb, names: list[str], raw: dict) -> dict[str, tuple[str, str]]:
+    """Every peer's behaviour, measured at once. A peer whose test got no
+    reply at all ("none": a lost packet, likely with many peers testing over
+    lossy links) is tested once more on its own; a wrong answer is not."""
+    measured = tb.parallel({s: (lambda s=s: measure_behaviour(tb, s, raw)) for s in names})
+    for side in [s for s in names if "none" in measured[s]]:
+        raw[f"retried_{side}"] = measured[side]
+        measured[side] = measure_behaviour(tb, side, raw)
+    return measured
+
+
 def nat_verify(tb, cfg, params, ctx) -> dict:
     names = [p.name for p in cfg.peers]
-    measured = tb.parallel({s: (lambda s=s: measure_behaviour(tb, s, ctx.raw)) for s in names})
+    measured = measure_all(tb, names, ctx.raw)
     metrics, ok = {}, True
     for side in names:
         exp_m, exp_f = expected_behaviour(cfg, side)

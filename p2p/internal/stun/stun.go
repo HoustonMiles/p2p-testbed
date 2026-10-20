@@ -1,6 +1,7 @@
 // Package stun is the smallest useful STUN client (RFC 8489): a Binding
 // request, and the XOR-MAPPED-ADDRESS (or legacy MAPPED-ADDRESS) from the
-// response. That is all a peer needs to learn its public address.
+// response, which is all a peer needs to learn its public address; and the
+// message format with MESSAGE-INTEGRITY (message.go), which TURN builds on.
 package stun
 
 import (
@@ -37,65 +38,33 @@ func IsMessage(b []byte) bool {
 }
 
 // Request builds a Binding request with no attributes.
-func Request(id TxID) []byte {
-	b := make([]byte, headerLen)
-	binary.BigEndian.PutUint16(b[0:2], bindingRequest)
-	binary.BigEndian.PutUint32(b[4:8], cookie)
-	copy(b[8:20], id[:])
-	return b
-}
+func Request(id TxID) []byte { return Message{Type: bindingRequest, ID: id}.Encode() }
 
 // Response builds a Binding success response carrying XOR-MAPPED-ADDRESS.
 // The tool doesn't need it; it is here for tests.
 func Response(id TxID, mapped netip.AddrPort) []byte {
-	b := make([]byte, headerLen, headerLen+12)
-	binary.BigEndian.PutUint16(b[0:2], bindingSuccess)
-	binary.BigEndian.PutUint16(b[2:4], 12)
-	binary.BigEndian.PutUint32(b[4:8], cookie)
-	copy(b[8:20], id[:])
-	ip := mapped.Addr().Unmap().As4()
-	b = binary.BigEndian.AppendUint16(b, attrXORMappedAddress)
-	b = binary.BigEndian.AppendUint16(b, 8)
-	b = append(b, 0, 0x01) // reserved, family IPv4
-	b = binary.BigEndian.AppendUint16(b, mapped.Port()^(cookie>>16))
-	return binary.BigEndian.AppendUint32(b, binary.BigEndian.Uint32(ip[:])^cookie)
+	return Message{Type: bindingSuccess, ID: id, Attrs: []Attr{{attrXORMappedAddress, XORAddress(mapped)}}}.Encode()
 }
 
 // Parse returns the mapped address from a Binding success response with the
-// given transaction ID.
+// given transaction ID, preferring XOR-MAPPED-ADDRESS over the legacy
+// MAPPED-ADDRESS.
 func Parse(b []byte, id TxID) (netip.AddrPort, bool) {
-	if !IsMessage(b) || binary.BigEndian.Uint16(b[0:2]) != bindingSuccess ||
-		TxID(b[8:20]) != id {
+	m, ok := Decode(b)
+	if !ok || m.Type != bindingSuccess || m.ID != id {
 		return netip.AddrPort{}, false
 	}
-	end := headerLen + int(binary.BigEndian.Uint16(b[2:4]))
-	if end > len(b) {
-		return netip.AddrPort{}, false
-	}
-	return mappedAddress(b[headerLen:end])
-}
-
-// mappedAddress walks the attributes and prefers XOR-MAPPED-ADDRESS over
-// the legacy MAPPED-ADDRESS.
-func mappedAddress(attrs []byte) (netip.AddrPort, bool) {
-	var legacy netip.AddrPort
-	for off := 0; off+4 <= len(attrs); {
-		typ := binary.BigEndian.Uint16(attrs[off:])
-		n := int(binary.BigEndian.Uint16(attrs[off+2:]))
-		if off+4+n > len(attrs) {
-			break
+	if v, ok := m.Get(attrXORMappedAddress); ok {
+		if a, ok := ParseXORAddress(v); ok {
+			return a, true
 		}
-		if a, ok := ipv4Attr(attrs[off+4 : off+4+n]); ok {
-			switch typ {
-			case attrXORMappedAddress:
-				return addr(a.ip^cookie, a.port^(cookie>>16)), true
-			case attrMappedAddress:
-				legacy = addr(a.ip, a.port)
-			}
-		}
-		off += 4 + (n+3)&^3 // attributes are padded to 4 bytes
 	}
-	return legacy, legacy.IsValid()
+	if v, ok := m.Get(attrMappedAddress); ok {
+		if a, ok := ipv4Attr(v); ok {
+			return addr(a.ip, a.port), true
+		}
+	}
+	return netip.AddrPort{}, false
 }
 
 type rawAddr struct {
@@ -116,4 +85,3 @@ func addr(ip uint32, port uint16) netip.AddrPort {
 	binary.BigEndian.PutUint32(a[:], ip)
 	return netip.AddrPortFrom(netip.AddrFrom4(a), port)
 }
-

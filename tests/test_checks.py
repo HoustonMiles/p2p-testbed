@@ -31,6 +31,18 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(out.count("FAIL  WAN host cannot reach"), 2)
 
 
+class RelaySmokeTest(unittest.TestCase):
+    def test_relay_is_checked(self):
+        code, out = run_quietly(checks.smoke, FakeTestbed())
+        self.assertEqual(code, 0, out)
+        self.assertIn("the relay sees peer-a as 198.18.1.10", out)
+
+    def test_relay_down_fails(self):
+        code, out = run_quietly(checks.smoke, FakeTestbed(relay=False))
+        self.assertEqual(code, 1)
+        self.assertIn("no reply from the relay", out)
+
+
 class VerifyTest(unittest.TestCase):
     def test_matching_behaviour_passes(self):
         code, out = run_quietly(checks.verify, FakeTestbed(), False)
@@ -59,6 +71,16 @@ class VerifyTest(unittest.TestCase):
         self.assertEqual(cfg.cgn_peers, {p.name for p in behind})
         self.assertEqual({cfg.factors[f"nat_{p.name}"] for p in behind}, {"full_cone"})
         self.assertEqual([u[0] for u in tb.ups[1:]], ["down", "compose"])  # plain `up` keeps the user's .env
+
+    def test_a_lost_reply_is_tested_again(self):
+        tb = FakeTestbed(behaviour={"b": [("EI", "none"), ("EI", "APD")]})
+        code, out = run_quietly(checks.verify, tb, False)
+        self.assertEqual(code, 0, out)
+
+    def test_a_wrong_answer_is_not_tested_again(self):
+        tb = FakeTestbed(behaviour={"b": [("EI", "AD"), ("EI", "APD")]})
+        code, out = run_quietly(checks.verify, tb, False)
+        self.assertEqual(code, 1)
 
     def test_every_running_peer_is_checked(self):
         tb = FakeTestbed(nat=("port_restricted",) * 5, behaviour={"e": ("APD", "APD")})

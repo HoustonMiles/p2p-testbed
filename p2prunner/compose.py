@@ -28,7 +28,7 @@ HEADER = """\
 #
 # Each peer is a household: a computer behind its home router, optionally
 # behind its ISP's carrier-grade NAT. wan (198.18.0.0/15) is the simulated
-# public internet, where the services (STUN, rendezvous; relay and attackers
+# public internet, where the services (STUN, rendezvous, relay; attackers
 # later) live. Addresses: see p2prunner/topology.py.
 #
 # A home router wired to both the wan and its carrier network uses the one
@@ -109,8 +109,31 @@ SERVICES = f"""\
       wan: {{ ipv4_address: {topology.RENDEZVOUS_IP} }}
     command: ["rendezvous", "-listen", ":7000"]
 
-  # Reserved WAN addresses for later steps:
-  #   {topology.RELAY_IP}  coturn relay
+  # relay: coturn as a TURN relay (RFC 8656), user testbed / password
+  # testbed. Peers in relayed mode (punch -relay) each allocate a relayed
+  # address here and send only to each other's, so neither learns the
+  # other's IP; their traffic stays Noise-encrypted end to end. A separate
+  # container from stun, so relay load never affects STUN results.
+  # RELAY_DELAY_MS delays what the relay sends (a relay out of the way:
+  # 2 x RELAY_DELAY_MS more round trip than the direct path).
+  relay:
+    build: ./testbed/stun           # the same coturn image as stun, in its relay role
+    image: p2p-testbed/stun
+    init: true
+    cap_add: [NET_ADMIN]            # needed for the optional delay (tc netem)
+    environment:
+      RELAY_IP: {topology.RELAY_IP}
+      RELAY_DELAY_MS: ${{RELAY_DELAY_MS:-0}}
+    networks:
+      wan: {{ ipv4_address: {topology.RELAY_IP} }}
+    command: ["start-relay.sh"]
+    healthcheck:                    # healthy once it answers a STUN request (no login needed)
+      test: ["CMD", "timeout", "3", "turnutils_stunclient", "{topology.RELAY_IP}"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+
+  # Reserved WAN addresses:
   #   {topology.STUN_ALT_IP}  STUN alternate IP (not visible to Docker, so keep it free)
   #   198.18.0.200+ attacker containers
 """

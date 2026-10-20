@@ -78,6 +78,7 @@ is a peer's name in capitals (`A`, `B`, ..., `AA`).
 | `UPLINK_MBIT`, `DOWNLINK_MBIT` | empty = no cap | Access link capacity. **Set `DOWNLINK_MBIT` for flood tests.** |
 | `NET_PROFILE_X`, `UPLINK_MBIT_X`, `DOWNLINK_MBIT_X` | empty = the global setting | One peer's own access link |
 | `UDP_TIMEOUT`, `UDP_TIMEOUT_STREAM` | `30`, `120` | Seconds an idle UDP pinhole stays open |
+| `RELAY_DELAY_MS` | `0` | One-way delay the relay adds to what it sends: a relay out of the way adds 2 x this to a relayed round trip |
 | `DEBUG` | `0`, `1` | Print each router's iptables rules at startup |
 
 ## Addresses
@@ -91,7 +92,8 @@ Defined once, in `p2prunner/topology.py`. For peer number k (a = 1, b = 2, ...):
 | cgn-x | carrier 10.201.k.2, WAN 198.18.k.11 |
 | stun | 198.18.0.100 and alternate 198.18.0.103, UDP/TCP 3478 and 3479 |
 | rendezvous | 198.18.0.101, UDP 7000 |
-| reserved | 198.18.0.102 coturn relay, 198.18.0.200+ attackers |
+| relay | 198.18.0.102, UDP 3478 (TURN), relayed addresses on ports 49152 to 65535 |
+| reserved | 198.18.0.200+ attackers |
 
 A peer's public IP is its home router's WAN IP, or its CGN's WAN IP when
 `UPSTREAM=cgnat`. The WAN is 198.18.0.0/15, the range reserved for
@@ -125,6 +127,31 @@ docker compose exec peer-a turnutils_natdiscovery -m -f 198.18.0.100        # ma
 
 `turnutils_stunclient` keeps waiting for RFC 5780 replies that a filtering
 NAT correctly blocks, so give it a `timeout`.
+
+## TURN relay
+
+`relay` runs coturn as a TURN relay (RFC 8656), from the same image as
+`stun` but its own container, so relay load never affects STUN results.
+Login: user `testbed`, password `testbed`, realm `p2p-testbed` (long-term
+credentials; not a secret, the testbed never touches a real network).
+
+In relayed mode each peer allocates a relayed address and sends only to the
+other peers' relayed addresses, so no peer learns another's real IP; the
+traffic stays Noise-encrypted end to end, so the relay never sees what the
+peers send. The relay is on the WAN, so a relayed packet crosses the same
+two home routers as a direct one: without `RELAY_DELAY_MS` the relay costs
+only its processing time, which flatters it against a real relay that is
+some distance away.
+
+Check it from the host (the WAN bridge is reachable from there):
+
+```bash
+cd p2p && TURN_SERVER=198.18.0.102:3478 go test -run Live -v ./internal/turn
+```
+
+Two clients allocate, bind channels to each other's relayed address and
+send through the relay. `p2prunner smoke` also checks that a peer reaches
+the relay through its NAT.
 
 ## Design notes
 

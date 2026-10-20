@@ -40,8 +40,8 @@ starts a larger one (see [docs/testbed.md](docs/testbed.md#peers)).
 
 | Folder | What it is |
 |---|---|
-| `p2p/` | The system, in Go: rendezvous, STUN, Noise, the port-hopping direct channel, and `punch`, the peer program. Tests sit beside the code. |
-| `testbed/` | The emulated network: router, host and STUN container images, and the host setup script |
+| `p2p/` | The system, in Go: rendezvous, STUN, TURN, Noise, the port-hopping direct channel, and `punch`, the peer program. Tests sit beside the code. |
+| `testbed/` | The emulated network: router, host and coturn (STUN server and TURN relay) container images, and the host setup script |
 | `p2prunner/` | The experiment runner (Python): the address plan and compose file generator, runs experiment files, checks the testbed, writes and reports results |
 | `tests/` | The runner's tests (Python `unittest`, no Docker needed) |
 | `experiments/` | Experiment files: one `.toml` per experiment |
