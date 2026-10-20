@@ -1,9 +1,10 @@
 // Package rendezvous is the introduction server for hole punching. Each peer
-// sends Register (room, its peer ID, and its static public key if it has
-// one) from the socket it will punch with. Every Register is answered with
-// one PeerInfo per other member of the room, and each of those members gets
-// a PeerInfo about the sender: each one's public address as seen here, and
-// the other's ID and key. A full mesh forms as every pair punches.
+// sends Register (room, its peer ID, and its static public key and relayed
+// address if it has them) from the socket it will punch with. Every
+// Register is answered with one PeerInfo per other member of the room, and
+// each of those members gets a PeerInfo about the sender: each one's public
+// address as seen here, and the other's ID, key and relayed address. A full
+// mesh forms as every pair punches, or links through the relay.
 //
 // Peers that take keys from here trust this server not to swap them; with
 // keys provisioned in advance (-peer-key FILE or DIR), they do not have to.
@@ -30,9 +31,9 @@ import (
 )
 
 type member struct {
-	addr netip.AddrPort
-	seen time.Time
-	key  []byte // the member's static public key; nil if it sent none
+	addr   netip.AddrPort
+	seen   time.Time
+	extras wire.Extras // the member's static key and relayed address, if it sent them
 }
 
 type room map[uint64]member // by peer ID
@@ -80,7 +81,7 @@ func (s *Server) register(p wire.Packet, from netip.AddrPort, now time.Time) {
 	}
 	s.expire(p.Room, r, now) // so no stale member is introduced
 	_, known := r[p.From]
-	self := member{from, now, registeredKey(p.Body)}
+	self := member{from, now, registered(p.Body)}
 	r[p.From] = self
 	if !known {
 		s.logf("room %d: %016x joined from %v (%d members)", p.Room, p.From, from, len(r))
@@ -94,18 +95,26 @@ func (s *Server) register(p wire.Packet, from netip.AddrPort, now time.Time) {
 	}
 }
 
-// registeredKey copies the key out of a Register body (the read buffer is
-// reused); a body of any other length carries no key.
-func registeredKey(body []byte) []byte {
-	if len(body) != wire.KeySize {
-		return nil
+// registered copies the key and relayed address out of a Register body
+// (the read buffer is reused).
+func registered(body []byte) wire.Extras {
+	e := wire.ParseExtras(body)
+	if e.Key != nil {
+		e.Key = append([]byte(nil), e.Key...)
 	}
-	return append([]byte(nil), body...)
+	return e
 }
 
-// introduce tells the member at to where member id is, and its key.
+// introduce tells the member at to where member id is, its key and its
+// relayed address. A member that registered a relayed address is
+// introduced by it alone: its own address is never handed out, so in
+// relayed mode no member learns another's IP, not even from here.
 func (s *Server) introduce(roomID uint64, to netip.AddrPort, id uint64, m member) {
-	body := wire.Intro{Self: to, Peer: m.addr, PeerID: id, PeerKey: m.key}.Append(nil)
+	peer := m.addr
+	if m.extras.Relay.IsValid() {
+		peer = m.extras.Relay
+	}
+	body := wire.Intro{Self: to, Peer: peer, PeerID: id, Extras: m.extras}.Append(nil)
 	s.send(to, wire.Packet{Type: wire.PeerInfo, Room: roomID, Body: body})
 }
 

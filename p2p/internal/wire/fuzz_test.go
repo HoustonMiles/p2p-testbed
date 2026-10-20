@@ -22,13 +22,15 @@ func FuzzParse(f *testing.F) {
 	})
 }
 
-// A PeerInfo body that is accepted re-encodes to its prefix (a key of the
+// A PeerInfo body that is accepted re-encodes to its prefix (a tail of the
 // wrong length is dropped).
 func FuzzParseIntro(f *testing.F) {
 	in := Intro{Self: netip.MustParseAddrPort("203.0.113.10:1"),
 		Peer: netip.MustParseAddrPort("203.0.113.20:65535"), PeerID: 5}
 	f.Add(in.Append(nil))
-	in.PeerKey = bytes.Repeat([]byte{1}, KeySize)
+	in.Key = bytes.Repeat([]byte{1}, KeySize)
+	f.Add(in.Append(nil))
+	in.Relay = netip.MustParseAddrPort("198.18.0.102:50001")
 	f.Add(in.Append(nil))
 	f.Add([]byte{1, 2, 3})
 	f.Fuzz(func(t *testing.T, b []byte) {

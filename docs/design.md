@@ -13,13 +13,14 @@ p2p/
   internal/
     peer/             one peer's run, with one link per member: peer.go (the steps),
                       socket.go (the one socket, dispatch to links), meet.go (STUN, rendezvous),
-                      link.go (one link: its goroutine and state), punch.go, handshake.go,
-                      hop.go, barrier.go, measure.go, result.go; loopback_test.go and
-                      mesh_test.go run whole trials
+                      link.go (one link: its goroutine and state), punch.go, relay.go
+                      (relayed mode), handshake.go, hop.go, barrier.go, measure.go,
+                      result.go; loopback_test.go, mesh_test.go and relay_test.go (with a
+                      fake TURN relay) run whole trials
     rendezvous/       rooms: server.go, and client.go (a member's side)
     stun/             STUN messages, with MESSAGE-INTEGRITY (the format TURN builds on)
     turn/             the TURN client: allocation with long-term credentials, permissions,
-                      channels, ChannelData (the relay baseline; used by the peer from step 5b)
+                      channels, ChannelData (relayed mode)
     direct/           the port-hopping channel: schedule, hopper, slots, probe, drain, receive
     noise/            Noise handshake, encrypted session, replay window
     identity/         static keys and trusted-key directories
@@ -145,6 +146,32 @@ block the real initiator (the responder starts over). In the testbed both
 peers can read both private keys in `./keys`; attacker containers must not
 mount it.
 
+## Relayed mode (TURN)
+
+`punch -relay` is the comparison baseline: every link goes through the
+testbed's TURN relay (`relay`, 198.18.0.102) instead of a hole punch, with
+the same steps and columns, so raw, direct and relayed runs line up.
+
+- Before registering at the rendezvous, the peer allocates a relayed
+  address on the relay (long-term credentials, `-relay-user` /
+  `-relay-pass`) and registers it with its key.
+- The rendezvous introduces a member that registered a relayed address by
+  that address only: its own address is never handed out, so no member
+  learns another's IP, not even from the rendezvous.
+- Each link binds a TURN channel to its member's relayed address
+  (`relay_bind_ms`; in place of the punch) and meets it at the connected
+  barrier through the relay. Each side sends only to the other's relayed
+  address, so both IPs stay hidden, and data travels as ChannelData (4
+  bytes of header).
+- With `-direct` too, the Noise handshake runs through the relay and every
+  packet after it is sealed with the session (pings, barriers, throughput):
+  the relay forwards only ciphertext. There is no hopping. A link opens
+  sealed packets as soon as its handshake is done, and seals its own once
+  the member's barrier after the handshake shows it is done too.
+- Both sides must be in relayed mode: a member with no relayed address
+  fails the link at once.
+- At the end the peer releases its allocation.
+
 ## Flags
 
 `punch -h` lists every flag. The direct channel's:
@@ -164,6 +191,14 @@ mount it.
 | `-hop-force` | off | hop even when a NAT changes ports, to measure the failure |
 | `-clock-offset`, `-clock-drift-ppm` | 0 | skew this peer's hop clock |
 
+Relayed mode's:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-relay` | off | every link through the TURN relay (with `-direct`: Noise through the relay, no hopping) |
+| `-relay-server` | `198.18.0.102:3478` | the relay |
+| `-relay-user`, `-relay-pass` | `testbed`, `testbed` | its long-term credentials |
+
 ## Result columns
 
 One row per link. The peer's own columns repeat in each of its rows:
@@ -173,10 +208,15 @@ and `start_unix_ms` (when its run began, which puts every member's `*_ms`
 columns on one timeline).
 The link's own: `peer_id` (the member at the other end), `error`, the
 rendezvous and punch steps, `ready_ms` (start to the link being usable:
-punched, and in direct mode hopping both ways), the ping and throughput measurements
+punched, and in direct mode hopping both ways; relayed: the channel bound,
+and in direct mode the handshake done), the ping and throughput measurements
 (`rtt_ms_*`, `tx_*`, `rx_*`), and `rx_start_ms` / `rx_end_ms` (when the
 link's Data arrived, since start: the test's place in the run). Before mesh
 step 2, `name` and `room` were `role` and `session`.
+
+Relayed mode adds `relayed`, `relay_addr` (our relayed address),
+`relay_ms` (start to the allocation), `peer_relay_addr` and
+`relay_bind_ms`; `rx_ip_mbit` then also counts ChannelData's 4 bytes.
 
 Direct mode adds: `direct`, `noise`, `peer_key_from`, `initiator`,
 `handshake_ms`, `keeps_port`, `peer_keeps_port`, `hop_possible`, `hopping`,

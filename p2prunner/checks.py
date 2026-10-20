@@ -60,6 +60,9 @@ def preflight(tb: Testbed, need_running: bool = True) -> str | None:
     if missing:
         return (f"Not running: {', '.join(missing)}. Start the testbed first:\n"
                 "  docker compose up -d --build --wait   (or: p2prunner up --peers N)")
+    if strays := tb.strays():
+        return (f"Containers of another stack are running too: {', '.join(strays)}.\n"
+                "Start clean: uv run python -m p2prunner down, then docker compose up -d --wait")
     return None
 
 

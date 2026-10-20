@@ -27,8 +27,9 @@
 // Throughput runs pair by pair in one order every member agrees on (sorted
 // by the pair's IDs), so no two members ever wait on each other in a cycle.
 //
-// TODO(paper §5 Relayed Mode): add a relay mode that runs steps 4 and 5
-// through the coturn relay (198.18.0.102) with the same Noise transport.
+// With Config.Relay set, every link goes through the TURN relay instead of
+// a hole punch (relay.go): the relayed baseline the direct channel is
+// compared against, with the same steps and columns.
 package peer
 
 import (
@@ -45,6 +46,7 @@ import (
 	"p2ptestbed/p2p/internal/identity"
 	"p2ptestbed/p2p/internal/rendezvous"
 	"p2ptestbed/p2p/internal/stun"
+	"p2ptestbed/p2p/internal/turn"
 	"p2ptestbed/p2p/internal/wire"
 )
 
@@ -75,6 +77,7 @@ type Config struct {
 	Linger time.Duration // keep answering the members this long before exiting
 
 	Direct *DirectConfig // nil: raw UDP
+	Relay  *RelayConfig  // nil: punch a direct path; set: every link goes through the TURN relay
 
 	Logf func(format string, args ...any)
 
@@ -101,13 +104,20 @@ type DirectConfig struct {
 	dropHopSends bool // tests: mimic a NAT that blocks one direction of the hop path
 }
 
+// RelayConfig is the TURN relay for relayed mode (relay.go).
+type RelayConfig struct {
+	Server             string // host:port
+	Username, Password string
+}
+
 type inbound struct {
 	from netip.AddrPort
 	at   time.Duration // since start
 	pkt  wire.Packet
-	stun []byte // set instead of pkt for STUN messages
-	link *link  // the member it came from; nil for the servers
-	hop  bool   // came through the link's Hopper, so answer through it
+	stun []byte         // set instead of pkt for STUN messages
+	turn *turn.Response // set instead of pkt for a reply from the TURN relay
+	link *link          // the member it came from; nil for the servers
+	hop  bool           // came through the link's Hopper, so answer through it
 }
 
 type runner struct {
@@ -126,6 +136,7 @@ type runner struct {
 	linksMu sync.RWMutex     // links is read by the reader goroutines
 	links   map[uint64]*link // by peer ID
 	ports   *direct.Ports    // the links' shared hop sockets, in direct mode
+	relay   *relay           // our allocation, in relayed mode
 	wg      sync.WaitGroup   // the links' goroutines
 	done    chan struct{}    // ends the links' goroutines
 	stop    chan struct{}    // ends keepRegistered
@@ -159,6 +170,7 @@ func newRunner(cfg Config) *runner {
 	}
 	r.res = PeerResult{Name: cfg.Name, Room: cfg.Room, ID: idString(r.id), RateMbit: cfg.RateMbit, PacketBytes: cfg.Size,
 		StartUnixMs: float64(r.t0.UnixMicro()) / 1000}
+	r.res.Relayed = cfg.Relay != nil
 	if d := cfg.Direct; d != nil {
 		r.res.Direct, r.res.Noise, r.res.PeerKeyFrom = true, d.Noise, d.PeerKeyFrom
 		r.res.HopIntervalMs = ptr(ms(d.HopInterval))
@@ -181,6 +193,13 @@ func (r *runner) run() error {
 	if r.cfg.Direct != nil {
 		defer r.closeHoppers() // after linger has stopped the links
 		r.ports = direct.NewPorts(r.localIP())
+	}
+	if r.cfg.Relay != nil {
+		var err error
+		if r.relay, err = newRelay(r.cfg.Relay); err != nil {
+			return err
+		}
+		defer r.release()
 	}
 	if err := r.meet(); err != nil {
 		return err
@@ -211,6 +230,11 @@ func (r *runner) meet() error {
 	if r.cfg.STUN != "" {
 		if err := r.doSTUN(); err != nil {
 			r.logf("stun: %v (continuing without it)", err)
+		}
+	}
+	if r.relay != nil {
+		if err := r.allocate(); err != nil {
+			return err
 		}
 	}
 	if err := r.meetAtRendezvous(); err != nil {

@@ -27,6 +27,7 @@
 | Mesh step 4b-2: `mesh` trial type (every peer at once), `links.jsonl`, mesh-level columns (pairs usable, as predicted by RFC 4787, time to full mesh), `start_unix_ms`, `p2prunner mesh` report, `mesh_scale` experiment | done, tests pass; in a 4-CPU VM without netem (2 runs per configuration): all 1,240 link ends as RFC 4787 predicts; realistic meshes complete at 2 to 16 peers, time to full mesh about 0.2 / 0.6 / 1.3 s at 4 / 8 / 16 peers | `p2prunner/mesh.py`, `p2prunner/nat.py` |
 | Mesh step 4c: peers join a running mesh (each link starts when its member is introduced); `stagger_ms` spaces the starts; join time per peer (`join_ms_*`); `[params]` keys as matrix keys; `mesh_join` experiment | done, tests pass; in a 4-CPU VM without netem (2 runs per configuration): every pair as predicted at every spacing; median join time at 16 peers 317 ms all at once, 169 ms at 500 ms spacing or more (8 peers: about 160 ms at any spacing) | `p2p/internal/peer/meet.go`, `p2prunner/mesh.py`, `p2prunner/experiment.py` |
 | Relay step 5a: TURN relay in the testbed (coturn at 198.18.0.102, long-term credentials, optional `RELAY_DELAY_MS`); Go TURN client (allocate, permissions, channels, ChannelData; no new dependencies) on a STUN message layer with MESSAGE-INTEGRITY; relay in `smoke`; NAT checks retry a peer that got no reply | done, tests pass; MESSAGE-INTEGRITY checked against the RFC 5769 sample; relay-to-relay through coturn from the host and from behind a port-restricted NAT | `p2p/internal/turn/`, `p2p/internal/stun/message.go`, `testbed/stun/` |
+| Relay step 5b: `punch -relay` (every link through the TURN relay, with Noise sealing everything after the handshake under `-direct`); the rendezvous carries relayed addresses and introduces relayed members by them alone; `relay` outcome in mesh trials; `smoke`/`verify` refuse a mix of two stacks; `run` says which configuration is left running | done, tests pass (fake TURN relay in the loopback tests; the relay sees no readable Data under `-direct`, mutation-checked); real coturn: two symmetric NATs, which cannot punch, connected with 20/20 pings and 20 Mbit/s; 8 peers of every NAT type: 28/28 pairs through the relay against 15/28 hop-connected | `p2p/internal/peer/relay.go`, `p2p/internal/wire`, `p2p/internal/rendezvous` |
 | Result reports (standard library only) | done | `p2prunner hops`, `p2prunner compare` (`p2prunner/reports.py`) |
 | Tests: Go unit + fuzz tests beside the code, Python `unittest` in `tests/` | done | [testing.md](testing.md) |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
@@ -42,7 +43,7 @@
 | Part | What it is for |
 |---|---|
 | Full mesh, next: per-peer clock offsets in mesh trials, port clashes between a peer's links, a long-running mesh (members leaving and rejoining) | The paper's system is a mesh of pairwise direct links |
-| Relay baseline, steps 5b and 5c: `punch -relay` (relayed links for every member of a mesh), `relay_matrix` and `relay_path` experiments | The comparison baseline, and the path for pairings that cannot hop |
+| Relay baseline, step 5c: `relay_matrix` and `relay_path` experiments (Experiment B's third arm) | The comparison baseline, and the path for pairings that cannot hop |
 | Handoff Manager | Falls back to the relay when `hop_possible` is false or hopping stops holding |
 | Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |
 | Experiment C | Attack resilience, direct hopping vs relay (`hop_drain_cutoffs`, `hop_unrouted`, `hop_foreign`, `hop_auth_failed` are there for it) |
@@ -126,7 +127,9 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
   holds the members' public keys (a key directory).
 - Threat model: the rendezvous is unauthenticated, so anyone who knows a
   room number learns its members' addresses (not their traffic: the
-  handshake still proves keys). Say so, or authenticate Register.
+  handshake still proves keys). Say so, or authenticate Register. In
+  relayed mode it hands out only relayed addresses, so members never learn
+  each other's IPs; the rendezvous and the relay themselves still see them.
 - Procedures: the rendezvous is UDP, not WebSocket (it must see each peer's
   public UDP mapping for the punch); it carries the static public keys. The
   handshake is Noise KK, IK or XX (`-noise`), matching the "peers already

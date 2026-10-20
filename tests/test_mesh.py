@@ -122,6 +122,14 @@ class FullMeshTest(unittest.TestCase):
 
 
 
+class RelayedMeshTest(unittest.TestCase):
+    def test_every_pair_is_predicted_to_connect(self):
+        rows = {n: [link(n, m, punched=False, hop_connected=False) for m in "abc" if m != n] for n in "abc"}
+        cfg = config(peers=3, nat_a="symmetric", nat_b="symmetric")
+        m = mesh(Peers(temp_dir(self), rows, keys=tuple("abc")), cfg, {"args": "-relay -direct"}, TrialContext(0, 1))
+        self.assertEqual((m["pairs_relay"], m["pairs_usable"], m["pairs_as_predicted"], m["ok"]), (3, 3, 3, True))
+
+
 class StaggerTest(unittest.TestCase):
     """Peers start stagger_ms apart, in name order, and wait long enough at
     the rendezvous for the last; join times count only earlier members."""

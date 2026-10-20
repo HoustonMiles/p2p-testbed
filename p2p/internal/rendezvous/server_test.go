@@ -49,7 +49,7 @@ func (c *client) collect(d time.Duration) (intros map[uint64][]byte, left map[ui
 		case !ok || p.Room != c.room:
 		case p.Type == wire.PeerInfo:
 			if in, ok := wire.ParseIntro(p.Body); ok {
-				intros[in.PeerID] = append([]byte(nil), in.PeerKey...)
+				intros[in.PeerID] = append([]byte(nil), in.Key...)
 			}
 		case p.Type == wire.PeerLeft:
 			left[wire.ParseU64(p.Body)] = true
@@ -126,4 +126,34 @@ func keys(m map[uint64][]byte) []uint64 {
 		out = append(out, k)
 	}
 	return out
+}
+
+// A member in relayed mode registers its relayed address with its key; the
+// others are introduced to both, through the real Client's Register, and
+// never to its own address.
+func TestRelayedAddressIsPassedOn(t *testing.T) {
+	server := startServer(t, 5*time.Second)
+	relay := netip.MustParseAddrPort("198.18.0.102:50001")
+	a, b := newClient(t, 1, 10), newClient(t, 1, 11)
+	reg := (&Client{Server: server, Room: 1, ID: 10, Key: bytes.Repeat([]byte{1}, wire.KeySize), Relay: relay}).Register()
+	a.conn.WriteToUDPAddrPort(reg, server)
+	b.register(server)
+	buf := make([]byte, 2048)
+	b.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		n, err := b.conn.Read(buf)
+		if err != nil {
+			t.Fatal("b was never introduced to a")
+		}
+		p, _ := wire.Parse(buf[:n])
+		if in, ok := wire.ParseIntro(p.Body); ok && p.Type == wire.PeerInfo && in.PeerID == 10 {
+			if in.Relay != relay || !bytes.Equal(in.Key, bytes.Repeat([]byte{1}, wire.KeySize)) {
+				t.Fatalf("a introduced with %+v", in.Extras)
+			}
+			if in.Peer != relay {
+				t.Fatalf("a's own address %v was handed out; want only its relayed address", in.Peer)
+			}
+			return
+		}
+	}
 }

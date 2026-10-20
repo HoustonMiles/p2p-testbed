@@ -96,6 +96,12 @@ class PreflightTest(unittest.TestCase):
             problem = checks.preflight(FakeTestbed(running=False))
         self.assertIn("nat-a", problem)
 
+    def test_refuses_a_mix_of_two_stacks(self):
+        with mock.patch("subprocess.run", return_value=Done()):
+            problem = checks.preflight(FakeTestbed(stray=["nat-c", "peer-c"]))
+        self.assertIn("another stack", problem)
+        self.assertIn("peer-c", problem)
+
     def test_all_types_does_not_need_a_running_testbed(self):
         with mock.patch("subprocess.run", return_value=Done()):
             self.assertIsNone(checks.preflight(FakeTestbed(running=False), need_running=False))

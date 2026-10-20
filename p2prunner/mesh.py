@@ -17,7 +17,8 @@ args can override).
 
 $seed, $trial and $<param> in args are filled in as for the command trial;
 the trial seed is the room. In direct mode, peers without a key in ./keys
-get one first.
+get one first. With -relay in args every link goes through the TURN relay,
+so every pair should connect whatever its NATs.
 
 Each peer prints one JSON row per link. They go to links.jsonl, one row per
 link end: `peer` and `member` name its two ends, `outcome` and `predicted`
@@ -30,19 +31,41 @@ from __future__ import annotations
 import itertools
 import json
 import statistics
+from dataclasses import dataclass
 
 from p2prunner import nat
 from p2prunner.trials import fill
 
-# What a pair of links (both ends) can come to, from best to worst.
-OUTCOMES = ("hop", "punch", "none", "error")
+# What a pair of links (both ends) can come to.
+OUTCOMES = ("hop", "relay", "punch", "none", "error")
+
+
+@dataclass(frozen=True)
+class Mode:
+    """How the trial's peers link: punch's -direct and -relay."""
+    direct: bool
+    relayed: bool
+
+    @classmethod
+    def of(cls, args: str) -> "Mode":
+        flags = args.split()
+        return cls(direct="-direct" in flags, relayed="-relay" in flags)
+
+    @property
+    def usable(self) -> str:
+        """The outcome that makes a pair usable in this mode."""
+        return "relay" if self.relayed else "hop" if self.direct else "punch"
+
+    def predicted(self, cfg, a: str, b: str) -> str:
+        """Through the relay every pair connects; otherwise RFC 4787 decides."""
+        return "relay" if self.relayed else nat.predicted(cfg, a, b, self.direct)
 
 
 def mesh(tb, cfg, params, ctx) -> dict:
     names = [p.name for p in cfg.peers]
     args = fill(str(params.get("args", "")), params, ctx)
-    direct = "-direct" in args.split()
-    if direct:
+    mode = Mode.of(args)
+    if mode.direct:
         ensure_keys(tb, names)
     timeout = float(params.get("timeout_s", 120))
     commands = peer_commands(names, ctx.seed, args, float(params.get("stagger_ms", 0)) / 1000)
@@ -50,8 +73,8 @@ def mesh(tb, cfg, params, ctx) -> dict:
             for n, (cmd, delay) in commands.items()}
     rows = read_rows(tb.parallel(jobs, all_at_once=True), ctx.raw)
     pairs = pair_rows(names, rows)
-    ctx.links.extend(link_rows(cfg, pairs, direct))
-    return mesh_metrics(cfg, pairs, rows, direct)
+    ctx.links.extend(link_rows(cfg, pairs, mode))
+    return mesh_metrics(cfg, pairs, rows, mode)
 
 
 def peer_commands(names: list[str], room: int, args: str, stagger_s: float) -> dict[str, tuple[str, float]]:
@@ -99,22 +122,30 @@ def pair_rows(names: list[str], rows: dict[str, list[dict]]) -> dict[tuple[str, 
     return {(a, b): (ends.get((a, b)), ends.get((b, a))) for a, b in itertools.combinations(names, 2)}
 
 
-def pair_outcome(ends: tuple, direct: bool) -> str:
-    """hop: both ends hop-connected; punch: both punched (and, in direct
-    mode, could not hop); none: no path; error: an end failed or is missing."""
+def pair_outcome(ends: tuple, mode: Mode) -> str:
+    """hop: both ends hop-connected; relay: both ready through the relay;
+    punch: both punched (and, in direct mode, could not hop); none: no
+    path; error: an end failed or is missing."""
     if any(e is None or e.get("error") for e in ends):
         return "error"
-    if direct and all(e.get("hop_connected") for e in ends):
+    if mode.relayed:
+        return "relay" if both(ends, "ready_ms") else "none"
+    if mode.direct and both(ends, "hop_connected"):
         return "hop"
-    return "punch" if all(e.get("punched") for e in ends) else "none"
+    return "punch" if both(ends, "punched") else "none"
 
 
-def link_rows(cfg, pairs: dict, direct: bool) -> list[dict]:
+def both(ends: tuple, column: str) -> bool:
+    """The column is set (true, or a number) at both ends of the pair."""
+    return all(e.get(column) is not None and e.get(column) is not False for e in ends)
+
+
+def link_rows(cfg, pairs: dict, mode: Mode) -> list[dict]:
     """links.jsonl rows: each end's own row, named, with its pair's outcome
     and prediction and each end's expected NAT behaviour."""
     out = []
     for (a, b), ends in pairs.items():
-        pair = {"outcome": pair_outcome(ends, direct), "predicted": nat.predicted(cfg, a, b, direct)}
+        pair = {"outcome": pair_outcome(ends, mode), "predicted": mode.predicted(cfg, a, b)}
         for (me, other), row in zip(((a, b), (b, a)), ends):
             if row is not None:
                 out.append({"peer": me, "member": other, **pair, **behaviour(cfg, me, "peer"),
@@ -127,16 +158,16 @@ def behaviour(cfg, name: str, prefix: str) -> dict:
     return {f"{prefix}_mapping": mapping, f"{prefix}_filtering": filtering}
 
 
-def mesh_metrics(cfg, pairs: dict, rows: dict, direct: bool) -> dict:
+def mesh_metrics(cfg, pairs: dict, rows: dict, mode: Mode) -> dict:
     """The trial row: how much of the mesh came up, how much as RFC 4787
     predicts, and how long it took (time_to_* from the first peer's start)."""
-    outcomes = {p: pair_outcome(ends, direct) for p, ends in pairs.items()}
-    usable = [p for p, o in outcomes.items() if o == ("hop" if direct else "punch")]
+    outcomes = {p: pair_outcome(ends, mode) for p, ends in pairs.items()}
+    usable = [p for p, o in outcomes.items() if o == mode.usable]
     reported = [n for n, r in rows.items() if r]
     metrics = {
         "peers": len(rows), "peers_reported": len(reported),
         "members_min": min((r[0]["members"] for r in rows.values() if r), default=0),
-        **pair_counts(cfg, outcomes, direct), "pairs_usable": len(usable),
+        **pair_counts(cfg, outcomes, mode), "pairs_usable": len(usable),
         "time_to_usable_ms": ready_span(rows, [pairs[p] for p in usable]),
         **join_times({p: pairs[p] for p in usable}),
     }
@@ -145,12 +176,12 @@ def mesh_metrics(cfg, pairs: dict, rows: dict, direct: bool) -> dict:
     return metrics
 
 
-def pair_counts(cfg, outcomes: dict, direct: bool) -> dict:
+def pair_counts(cfg, outcomes: dict, mode: Mode) -> dict:
     """pairs, pairs per outcome, and the pairs whose outcome RFC 4787 predicts."""
     return {
         "pairs": len(outcomes),
         **{f"pairs_{o}": sum(v == o for v in outcomes.values()) for o in OUTCOMES},
-        "pairs_as_predicted": sum(o == nat.predicted(cfg, a, b, direct) for (a, b), o in outcomes.items()),
+        "pairs_as_predicted": sum(o == mode.predicted(cfg, a, b) for (a, b), o in outcomes.items()),
     }
 
 

@@ -1,35 +1,40 @@
-Relay step 5a: TURN relay in the testbed, and a TURN client
+Relay step 5b: punch -relay, every link through the TURN relay
 
-The relay baseline's first half: the relay itself, and the client code a
-peer will use to reach it (step 5b wires it into punch).
+The relayed baseline in the peer: the same steps and columns as the punched
+modes, so raw, direct and relayed runs line up.
 
-- testbed: a relay service, coturn as a TURN relay (RFC 8656) at the
-  reserved 198.18.0.102, from the same image as stun but its own
-  container. Long-term credentials testbed / testbed, realm p2p-testbed;
-  relayed ports 49152-65535; UDP only. RELAY_DELAY_MS (default 0) delays
-  what the relay sends, to model a relay out of the way (2 x the delay on
-  a relayed round trip); a new experiment setting that is kept out of
-  older configurations' IDs (all 120 unchanged).
-- p2p/internal/stun: the message format behind the Binding helpers
-  (Message, Encode, Decode, XOR addresses) and MESSAGE-INTEGRITY
-  (AppendIntegrity, CheckIntegrity), which TURN builds on.
-- p2p/internal/turn: the client side, socket-free like stun: Allocate with
-  the long-term 401 -> realm/nonce -> signed retry, stale nonce (438),
-  CreatePermission, ChannelBind, Refresh, ChannelData framing.
-  Success responses must carry our MESSAGE-INTEGRITY; a 401 to signed
-  credentials does not retry. No new dependencies.
-- p2prunner: smoke checks that a peer reaches the relay through its NAT;
-  preflight lists the relay; the ARP-table check counts it.
-- NAT checks (verify and the start of each configuration) test a peer once
-  more when its test got no reply at all ("none"), instead of restarting
-  the whole configuration; a wrong answer still fails at once.
-- docs: testbed.md (relay, RELAY_DELAY_MS, address), design.md, testing.md,
-  results.md (also the mesh_join coast results: about 425 ms join time in
-  every configuration, six round trips).
+- punch -relay (with -relay-server, -relay-user, -relay-pass): the peer
+  allocates a relayed address before it registers at the rendezvous; each
+  link binds a TURN channel to its member's relayed address (in place of
+  the punch), meets it at the connected barrier through the relay, and
+  sends only to that address, so both IPs stay hidden. Data travels as
+  ChannelData. The allocation is released at the end.
+- With -direct too: the Noise handshake runs through the relay and every
+  packet after it is sealed with the session, so the relay forwards only
+  ciphertext (no hopping). A link opens sealed packets as soon as its
+  handshake is done and seals its own after the member's barrier, which
+  the member sends only once its own handshake is done.
+- wire: Register and PeerInfo carry an optional relayed address after the
+  key (Extras; the length says which is present).
+- rendezvous: stores and passes on relayed addresses, and introduces a
+  member that registered one by it alone: in relayed mode no member
+  learns another's IP, not even from the rendezvous.
+- Columns: relayed, relay_addr, relay_ms, peer_relay_addr, relay_bind_ms;
+  rx_ip_mbit also counts ChannelData's header.
+- mesh trial: a "relay" outcome; with -relay in args every pair is
+  predicted to connect.
+- runner: smoke and verify refuse to run while containers of another
+  stack run too (the orphan mix after an experiment); run says which
+  configuration it leaves running and how to go back.
 
-Tests: MESSAGE-INTEGRITY against the RFC 5769 sample request; the TURN
-login, forged and wrong-credential replies, stale nonce, channel binding
-and ChannelData against a fake server; a fuzz target for every reply;
-a live relay-to-relay test against coturn (TURN_SERVER=...), run from the
-host and from behind a port-restricted NAT; the relay smoke check; the
-NAT-check retry (mutation-checked).
+Testbed (no netem): two symmetric NATs, which cannot punch, connected
+through coturn with Noise: 20/20 pings, 20 Mbit/s, no loss, each side
+knowing only the other's relayed address. 8 peers of every NAT type:
+28/28 pairs through the relay (time to full mesh 0.46 s), against 15/28
+hop-connected in direct mode; both 100% as predicted.
+
+Tests: loopback meshes through a fake TURN relay, raw and Noise, with
+the relay unable to read a single Data packet under -direct
+(mutation-checked); a member not in relayed mode; relayed addresses
+through the rendezvous, own address never handed out; the wire tail;
+the relay outcome; the two-stack check. Race suite clean.

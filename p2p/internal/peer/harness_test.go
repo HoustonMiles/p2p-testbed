@@ -120,6 +120,29 @@ func startPeer(t *testing.T, c Config) <-chan []*Result {
 }
 
 // peerConfig is the i-th peer's config: short steps, and what extra sets.
+// checkPath: punched (and hop-connected in direct mode), or, relayed,
+// through a bound channel to a member we only ever knew by its relayed
+// address.
+func checkPath(t *testing.T, name string, r *Result) {
+	t.Helper()
+	if r.Relayed {
+		if r.RelayBindMs == nil || r.PeerRelayAddr == nil || show(r.PeerRdvAddr) != *r.PeerRelayAddr || r.Punched {
+			t.Errorf("%s: relayed link: bind %s, introduced as %s, relayed address %s, punched %v",
+				name, show(r.RelayBindMs), show(r.PeerRdvAddr), show(r.PeerRelayAddr), r.Punched)
+		}
+		return
+	}
+	if !r.Punched || r.PunchMs == nil {
+		t.Errorf("%s: not punched", name)
+	}
+	if r.PeerAddrChanged == nil || *r.PeerAddrChanged {
+		t.Errorf("%s: peer address changed without a NAT", name)
+	}
+	if r.Direct && !r.HopConnected {
+		t.Errorf("%s: not hop connected", name)
+	}
+}
+
 func peerConfig(name string, i int, extra Config) Config {
 	c := Config{
 		Name: name, Room: 42, Peers: extra.Peers, Local: net.IPv4(127, 0, 0, byte(2+i)).String() + ":0",
@@ -132,6 +155,10 @@ func peerConfig(name string, i int, extra Config) Config {
 	if extra.Direct != nil {
 		d := *extra.Direct // each peer gets its own copy to adjust
 		c.Direct = &d
+	}
+	if extra.Relay != nil {
+		relay := *extra.Relay
+		c.Relay = &relay
 	}
 	if extra.StepTimeout != 0 {
 		c.StepTimeout = extra.StepTimeout
@@ -187,20 +214,15 @@ func checkRow(t *testing.T, name string, r *Result) {
 	if r.Error != "" {
 		t.Errorf("%s: %s", name, r.Error)
 	}
-	if !r.Punched || r.PunchMs == nil || r.ReadyMs == nil {
-		t.Errorf("%s: not punched, or never ready", name)
+	if r.ReadyMs == nil {
+		t.Errorf("%s: never ready", name)
 	}
+	checkPath(t, name, r)
 	if since := time.Since(time.UnixMilli(int64(r.StartUnixMs))); since < 0 || since > time.Minute {
 		t.Errorf("%s: start_unix_ms %.0f is not when the run began", name, r.StartUnixMs)
 	}
-	if r.Direct && !r.HopConnected {
-		t.Errorf("%s: not hop connected", name)
-	}
 	if r.STUNAddr == nil || *r.STUNAddr != r.Local || r.MappingVaries == nil || *r.MappingVaries {
 		t.Errorf("%s: stun %s, local %v", name, show(r.STUNAddr), r.Local)
-	}
-	if r.PeerAddrChanged == nil || *r.PeerAddrChanged {
-		t.Errorf("%s: peer address changed without a NAT", name)
 	}
 	if r.PingsRecv != 20 || r.RTTP50 == nil {
 		t.Errorf("%s: %d/20 pings", name, r.PingsRecv)

@@ -12,13 +12,15 @@ import (
 type Client struct {
 	Server   netip.AddrPort
 	Room, ID uint64
-	Key      []byte // our static public key; nil in raw mode
+	Key      []byte         // our static public key; nil in raw mode
+	Relay    netip.AddrPort // our relayed address on the TURN relay; invalid without one
 }
 
 // Register is the packet to send: repeatedly until introduced, then often
 // enough that the registration never expires while running.
 func (c *Client) Register() []byte {
-	return wire.Packet{Type: wire.Register, Room: c.Room, From: c.ID, Body: c.Key}.Append(nil)
+	body := wire.Extras{Key: c.Key, Relay: c.Relay}.Append(nil)
+	return wire.Packet{Type: wire.Register, Room: c.Room, From: c.ID, Body: body}.Append(nil)
 }
 
 // Introduction returns the member a PeerInfo from the server introduces.

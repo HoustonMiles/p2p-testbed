@@ -21,15 +21,19 @@ func TestIntro(t *testing.T) {
 	in := Intro{Self: netip.MustParseAddrPort("203.0.113.10:1000"),
 		Peer: netip.MustParseAddrPort("203.0.113.21:65535"), PeerID: 99}
 	out, ok := ParseIntro(in.Append(nil))
-	if !ok || out.Self != in.Self || out.Peer != in.Peer || out.PeerID != 99 || out.PeerKey != nil {
-		t.Fatalf("without a key: got %+v", out)
+	if !ok || out.Self != in.Self || out.Peer != in.Peer || out.PeerID != 99 || out.Key != nil || out.Relay.IsValid() {
+		t.Fatalf("without extras: got %+v", out)
 	}
-	in.PeerKey = bytes.Repeat([]byte{7}, KeySize)
-	if out, _ := ParseIntro(in.Append(nil)); !bytes.Equal(out.PeerKey, in.PeerKey) {
-		t.Fatalf("key: got %x", out.PeerKey)
+	relay := netip.MustParseAddrPort("198.18.0.102:50001")
+	for _, e := range []Extras{{Key: bytes.Repeat([]byte{7}, KeySize)}, {Relay: relay},
+		{Key: bytes.Repeat([]byte{7}, KeySize), Relay: relay}} {
+		in.Extras = e
+		if out, _ := ParseIntro(in.Append(nil)); !bytes.Equal(out.Key, e.Key) || out.Relay != e.Relay {
+			t.Fatalf("extras %+v: got %+v", e, out.Extras)
+		}
 	}
-	in.PeerKey = in.PeerKey[:5]
-	if out, ok := ParseIntro(in.Append(nil)); !ok || out.PeerKey != nil {
+	in.Extras = Extras{Key: make([]byte, 5)}
+	if out, ok := ParseIntro(in.Append(nil)); !ok || out.Key != nil {
 		t.Fatal("short key accepted")
 	}
 	if _, ok := ParseIntro(make([]byte, introLen-1)); ok {

@@ -141,9 +141,12 @@ func (l *link) sendData() uint64 {
 
 // sendDataPacket sends one Data packet; errors count as loss.
 func (l *link) sendDataPacket(pkt []byte) {
-	if l.hopper != nil {
+	switch {
+	case l.hopper != nil:
 		l.hopper.Send(pkt)
-	} else {
+	case l.r.relay != nil:
+		l.transmit(l.seal(pkt))
+	default:
 		l.r.conn.WriteToUDPAddrPort(pkt, l.remote)
 	}
 }
@@ -187,12 +190,21 @@ func (l *link) recordRx(peerSent int64) {
 	l.logf("throughput: received %d/%d packets, %.2f Mbit/s", rx.packets, peerSent, *res.RxMbit)
 }
 
+// headerBytes is what each Data packet carries on the wire besides its
+// payload: IP and UDP, plus Noise's header and tag when sealed, plus
+// ChannelData's 4 bytes when it came through the relay.
 func (l *link) headerBytes() int64 {
-	if l.hopper != nil {
-		return ipUDPHeader + noise.Overhead
+	n := int64(ipUDPHeader)
+	if l.hopper != nil || l.sealed.Load() != nil {
+		n += noise.Overhead
 	}
-	return ipUDPHeader
+	if l.r.relay != nil {
+		n += channelDataHeader
+	}
+	return n
 }
+
+const channelDataHeader = 4
 
 func percentile(sorted []float64, p float64) float64 {
 	k := float64(len(sorted)-1) * p / 100

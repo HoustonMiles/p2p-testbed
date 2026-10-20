@@ -84,11 +84,12 @@ first, b `stagger_ms` later, and so on, each joining the mesh the earlier
 ones are running; 0 (the default) starts everyone at the same moment. Its trial row has
 mesh-level columns: `pairs` (N(N-1)/2), `pairs_usable` (hop-connected at
 both ends in direct mode, punched in raw mode), `pairs_hop`, `pairs_punch`,
-`pairs_none`, `pairs_error`, `pairs_as_predicted` (the outcome RFC 4787
+`pairs_relay`, `pairs_none`, `pairs_error`, `pairs_as_predicted` (the outcome RFC 4787
 predicts for the pair's NAT behaviours, `p2prunner/nat.py`),
 `time_to_usable_ms` (from the first peer's start until the last usable
 pair was ready at both ends) and `time_to_full_mesh_ms` (the same, when
-every pair is usable; with `stagger_ms` it includes the spacing itself),
+every pair is usable; with `stagger_ms` it includes the spacing itself;
+with `-relay` in `args` every pair should come out `relay`),
 and `join_ms_p50` / `join_ms_max` (from a peer's start until its usable
 links with the members already running were ready at both ends). Each link
 end's own row goes to `links.jsonl`.
@@ -171,6 +172,14 @@ The same through the direct channel:
 ```bash
 docker compose exec peer-a punch -name a -room 42 -direct -hop-interval 1s
 docker compose exec peer-b punch -name b -room 42 -direct -hop-interval 1s
+```
+
+Through the TURN relay instead of a hole punch (works for every NAT
+pairing, including two symmetric NATs):
+
+```bash
+docker compose exec peer-a punch -name a -room 43 -relay -direct
+docker compose exec peer-b punch -name b -room 43 -relay -direct
 ```
 
 Use a new `-room` number for each try. `-name` labels the logs and results

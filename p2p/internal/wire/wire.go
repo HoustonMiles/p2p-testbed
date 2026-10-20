@@ -27,7 +27,7 @@ const (
 type Type uint8
 
 const (
-	Register   Type = iota + 1 // peer -> rendezvous: "I am <from> in <room>"; body: our static public key, if any
+	Register   Type = iota + 1 // peer -> rendezvous: "I am <from> in <room>"; body: our Extras (key, relayed address)
 	PeerInfo                   // rendezvous -> peer: an Intro of one other member of the room
 	Punch                      // peer -> peer: hole-punching probe
 	PunchAck                   // reply to a Punch: proves the path works both ways
@@ -93,43 +93,76 @@ func ParseU64(b []byte) uint64 {
 // PeerInfo.
 const KeySize = 32
 
+// Extras is the optional tail of a Register body and of a PeerInfo body: a
+// member's static public key, its relayed address on the TURN relay, or
+// both, in that order. Its length says which:
+//
+//	(empty) | key (32) | relayed address (IPv4, port: 6) | key + relayed address (38)
+type Extras struct {
+	Key   []byte         // nil when the member has none (raw mode)
+	Relay netip.AddrPort // invalid when the member has no relayed address
+}
+
+const addrLen = 6
+
+func (e Extras) Append(buf []byte) []byte {
+	buf = append(buf, e.Key...)
+	if e.Relay.IsValid() {
+		buf = appendAddr(buf, e.Relay)
+	}
+	return buf
+}
+
+// ParseExtras decodes a tail; Key aliases b. A tail of any other length
+// carries nothing.
+func ParseExtras(b []byte) Extras {
+	var e Extras
+	switch len(b) {
+	case KeySize:
+		e.Key = b
+	case addrLen:
+		e.Relay = getAddr(b)
+	case KeySize + addrLen:
+		e.Key, e.Relay = b[:KeySize], getAddr(b[KeySize:])
+	}
+	return e
+}
+
 // Intro is the PeerInfo body: the receiver's own public address as the
 // rendezvous sees it, and one other member of the room.
 //
-//	self (IPv4, port) | peer (IPv4, port) | peer ID (u64) | peer key (32 bytes, optional)
+//	self (IPv4, port) | peer (IPv4, port) | peer ID (u64) | the peer's Extras
 //
 // TODO(paper §5 Simulation Environment, real networks): IPv4 only; add
 // IPv6 addresses before running between people's own machines.
 type Intro struct {
 	Self, Peer netip.AddrPort
 	PeerID     uint64
-	PeerKey    []byte // nil when that peer registered without one
+	Extras     // the peer's key and relayed address, if it has them
 }
 
-const introLen = 6 + 6 + 8
+const introLen = addrLen + addrLen + 8
 
 func (in Intro) Append(buf []byte) []byte {
-	for _, a := range []netip.AddrPort{in.Self, in.Peer} {
-		ip := a.Addr().Unmap().As4()
-		buf = append(buf, ip[:]...)
-		buf = binary.BigEndian.AppendUint16(buf, a.Port())
-	}
+	buf = appendAddr(appendAddr(buf, in.Self), in.Peer)
 	buf = binary.BigEndian.AppendUint64(buf, in.PeerID)
-	return append(buf, in.PeerKey...)
+	return in.Extras.Append(buf)
 }
 
-// ParseIntro decodes a PeerInfo body. PeerKey aliases b. A key of any
-// length other than KeySize is ignored.
+// ParseIntro decodes a PeerInfo body. The key aliases b.
 func ParseIntro(b []byte) (Intro, bool) {
 	if len(b) < introLen {
 		return Intro{}, false
 	}
-	get := func(b []byte) netip.AddrPort {
-		return netip.AddrPortFrom(netip.AddrFrom4([4]byte(b[:4])), binary.BigEndian.Uint16(b[4:6]))
-	}
-	in := Intro{Self: get(b[0:6]), Peer: get(b[6:12]), PeerID: binary.BigEndian.Uint64(b[12:20])}
-	if len(b) == introLen+KeySize {
-		in.PeerKey = b[introLen:]
-	}
-	return in, true
+	return Intro{Self: getAddr(b[0:6]), Peer: getAddr(b[6:12]), PeerID: binary.BigEndian.Uint64(b[12:20]),
+		Extras: ParseExtras(b[introLen:])}, true
+}
+
+func appendAddr(buf []byte, a netip.AddrPort) []byte {
+	ip := a.Addr().Unmap().As4()
+	return binary.BigEndian.AppendUint16(append(buf, ip[:]...), a.Port())
+}
+
+func getAddr(b []byte) netip.AddrPort {
+	return netip.AddrPortFrom(netip.AddrFrom4([4]byte(b[:4])), binary.BigEndian.Uint16(b[4:6]))
 }

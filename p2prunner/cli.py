@@ -247,6 +247,9 @@ def finish(run: Run) -> None:
     print(f"\nDone in {fmt_duration(time.monotonic() - run.started)}. Results: {run.store.dir}\n"
           f"  {run.store.trials_path.name}  (pandas: pd.read_json(path, lines=True))\n"
           f"  {csv_path.name}")
+    if run.current is not None:
+        print(f"\nThe testbed is still running {run.exp.configs[run.current].label}.\n"
+              "  uv run python -m p2prunner down    returns to the committed two-peer stack")
 
 
 def base_row(exp, cfg, trial: int) -> dict:

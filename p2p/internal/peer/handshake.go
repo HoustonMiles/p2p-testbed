@@ -134,7 +134,7 @@ func (l *link) initiates(peerKey []byte) (bool, error) {
 
 func (l *link) resendHandshake() {
 	if last := l.hs.Last(); last != nil && !l.hs.Done() {
-		l.r.sendTo(l.remote, wire.Handshake, 0, last)
+		l.sendPlain(l.remote, wire.Handshake, 0, last)
 	}
 }
 
@@ -150,7 +150,7 @@ func (l *link) onHandshake(m inbound) {
 		return
 	}
 	if reply != nil {
-		l.r.sendTo(m.from, wire.Handshake, 0, reply)
+		l.sendPlain(m.from, wire.Handshake, 0, reply)
 	}
 	l.noteHandshakeDone(m.at)
 }

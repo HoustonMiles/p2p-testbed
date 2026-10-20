@@ -42,6 +42,10 @@ func (r *runner) readLoop() {
 		}
 		at := time.Since(r.t0)
 		from = netip.AddrPortFrom(from.Addr().Unmap(), from.Port())
+		if r.relay != nil && from == r.relay.server {
+			r.fromRelay(at, buf[:n])
+			continue
+		}
 		if stun.IsMessage(buf[:n]) {
 			r.in <- inbound{from: from, at: at, stun: append([]byte(nil), buf[:n]...)}
 			continue
@@ -157,6 +161,10 @@ var linkHandlers = map[wire.Type]func(*link, inbound){
 }
 
 func (l *link) handle(m inbound) {
+	if m.turn != nil {
+		l.onRelayReply(*m.turn)
+		return
+	}
 	if h := linkHandlers[m.pkt.Type]; h != nil {
 		h(l, m)
 	}
@@ -167,6 +175,8 @@ func (r *runner) handle(m inbound) {
 	switch {
 	case m.stun != nil:
 		r.onSTUN(m)
+	case m.turn != nil:
+		r.onRelayReply(*m.turn)
 	case m.pkt.Type == wire.PeerInfo:
 		r.onPeerInfo(m)
 	case m.pkt.Type == wire.PeerLeft:

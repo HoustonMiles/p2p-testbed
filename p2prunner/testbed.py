@@ -9,6 +9,7 @@ file, the committed two-peer docker-compose.yml is used.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -107,6 +108,17 @@ class Testbed:
 
     def services(self) -> list[str]:
         return self.compose("ps", "--status", "running", "--services").stdout.split()
+
+    def strays(self) -> list[str]:
+        """Running services of this testbed that its current compose file
+        does not define: left by another stack (e.g. an experiment's larger
+        one, then `docker compose up` with the committed file)."""
+        project = json.loads(self.compose("config", "--format", "json").stdout or "{}").get("name", "")
+        defined = set(self.compose("config", "--services").stdout.split())
+        ps = subprocess.run(["docker", "ps", "--filter", f"label=com.docker.compose.project={project}",
+                             "--format", '{{.Label "com.docker.compose.service"}}'],
+                            capture_output=True, text=True, timeout=60)
+        return sorted(set(ps.stdout.split()) - defined, key=str)
 
     def running_peers(self) -> list[str]:
         """Names of the running peers, in peer order (a, b, ..., z, aa, ...)."""

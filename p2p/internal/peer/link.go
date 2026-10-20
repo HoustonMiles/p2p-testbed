@@ -24,6 +24,13 @@ type link struct {
 	remote  netip.AddrPort // where its traffic goes; updated by learn
 	res     LinkResult
 
+	peerRelay netip.AddrPort                // relayed mode: the member's relayed address
+	channel   uint16                        // relayed mode: our TURN channel to it
+	bound     bool                          // the channel is bound
+	bindErr   error                         // the relay refused to bind it
+	opener    atomic.Pointer[noise.Session] // relayed + direct: our session, once the handshake is done: opens the member's packets
+	sealed    atomic.Pointer[noise.Session] // the same, once both sides hold it: seals our packets
+
 	in     chan inbound  // the member's packets, routed here by deliver
 	pinged chan struct{} // to the main loop: our pings are over (or the link ended)
 	turn   chan struct{} // the main loop: our throughput test may start
@@ -49,11 +56,14 @@ type link struct {
 
 func newLink(r *runner, in wire.Intro, at time.Duration) *link {
 	l := &link{r: r, peerID: in.PeerID, rdvAddr: in.Peer, remote: in.Peer,
-		rdvKey: append([]byte(nil), in.PeerKey...), rtts: map[uint64]float64{}, barrierState: newBarrierState(),
+		rdvKey: append([]byte(nil), in.Key...), rtts: map[uint64]float64{}, barrierState: newBarrierState(),
 		in: make(chan inbound, 1024), pinged: make(chan struct{}, 1), turn: make(chan struct{}, 1), tested: make(chan struct{}, 1)}
 	l.res.PeerID = idString(in.PeerID)
 	l.res.RendezvousMs = ptr(ms(at))
 	l.res.PeerRdvAddr = ptr(in.Peer.String())
+	if in.Relay.IsValid() {
+		l.peerRelay, l.res.PeerRelayAddr = in.Relay, ptr(in.Relay.String())
+	}
 	return l
 }
 
@@ -74,15 +84,42 @@ func (l *link) run() {
 	l.serve()
 }
 
-// connect runs steps 3 and, in direct mode, the direct channel's setup.
+// connect runs step 3 (a punch, or a channel through the relay) and, in
+// direct mode, the Noise handshake and what follows it.
 func (l *link) connect() bool {
-	if !l.punch() || !l.barrier(barrierWait{step: stepConnected, timeout: l.r.cfg.StepTimeout}) {
-		return false
-	}
-	if l.r.cfg.Direct != nil && !l.startDirect() {
+	if !l.reach() || !l.barrier(barrierWait{step: stepConnected, timeout: l.r.cfg.StepTimeout}) || !l.secure() {
 		return false
 	}
 	l.res.ReadyMs = ptr(ms(time.Since(l.r.t0)))
+	return true
+}
+
+func (l *link) reach() bool {
+	if l.r.relay != nil {
+		return l.bindRelay()
+	}
+	return l.punch()
+}
+
+// secure runs the direct channel: hopping on a punched path, or, through
+// the relay, the handshake alone. We open sealed packets as soon as our
+// handshake is done, and seal ours once the member's barrier shows it is
+// done too; it sends that barrier only after its handshake, so we can
+// always open what it seals.
+func (l *link) secure() bool {
+	switch {
+	case l.r.cfg.Direct == nil:
+		return true
+	case l.r.relay == nil:
+		return l.startDirect()
+	case !l.handshake():
+		return false
+	}
+	l.opener.Store(l.hs.Session())
+	if !l.barrier(barrierWait{step: stepSecured, timeout: l.r.cfg.StepTimeout}) {
+		return false
+	}
+	l.sealed.Store(l.hs.Session())
 	return true
 }
 
@@ -208,20 +245,41 @@ func (l *link) onHop(in direct.Inbound) {
 // reply answers m the way it came, so a member still one step behind
 // (before its Hopper is up) keeps getting answers on the punched socket.
 func (l *link) reply(m inbound, t wire.Type, seq uint64, body []byte) {
-	if m.hop && l.hopper != nil {
+	switch {
+	case m.hop && l.hopper != nil:
 		l.sendHop(wire.Packet{Type: t, Seq: seq, Body: body})
-		return
+	case l.r.relay != nil:
+		l.send(t, seq, body)
+	default:
+		l.r.sendTo(m.from, t, seq, body)
 	}
-	l.r.sendTo(m.from, t, seq, body)
 }
 
-// send uses the Hopper once it runs, the punched socket before.
+// send uses the Hopper once it runs, the relay in relayed mode (sealed once
+// the session is up), the punched socket otherwise.
 func (l *link) send(t wire.Type, seq uint64, body []byte) {
-	if l.hopper != nil {
+	switch {
+	case l.hopper != nil:
 		l.sendHop(wire.Packet{Type: t, Seq: seq, Body: body})
+	case l.r.relay != nil:
+		l.transmit(l.seal(l.packet(t, seq, body)))
+	default:
+		l.r.sendTo(l.remote, t, seq, body)
+	}
+}
+
+// sendPlain is for the handshake, which runs before any session: through
+// the relay in relayed mode, else to the given address.
+func (l *link) sendPlain(to netip.AddrPort, t wire.Type, seq uint64, body []byte) {
+	if l.r.relay != nil {
+		l.transmit(l.packet(t, seq, body))
 		return
 	}
-	l.r.sendTo(l.remote, t, seq, body)
+	l.r.sendTo(to, t, seq, body)
+}
+
+func (l *link) packet(t wire.Type, seq uint64, body []byte) []byte {
+	return wire.Packet{Type: t, Room: l.r.cfg.Room, From: l.r.id, Seq: seq, Body: body}.Append(nil)
 }
 
 func (l *link) sendHop(p wire.Packet) {

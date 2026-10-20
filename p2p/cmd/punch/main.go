@@ -1,10 +1,13 @@
 // punch runs one peer of a peer-to-peer trial: raw UDP by default, the
-// Port-Hopping Direct Channel with -direct. Peers meet in a room at the
-// rendezvous and link with every other member (a full mesh).
+// Port-Hopping Direct Channel with -direct, through the TURN relay instead
+// of a hole punch with -relay (with -direct too: Noise through the relay,
+// without hopping). Peers meet in a room at the rendezvous and link with
+// every other member (a full mesh).
 //
 //	punch -name a -room 42         # on peer-a
 //	punch -name b -room 42         # on peer-b, at the same time
 //	punch -name a -room 42 -direct -hop-interval 1s
+//	punch -name a -room 42 -relay -direct   # the relayed baseline
 //	punch -name a -room 42 -peers 3   # a room of three: links to both others
 //	punch -genkey /keys/a          # write /keys/a.key and /keys/a.pub, then exit
 //
@@ -34,6 +37,8 @@ func main() {
 	measureFlags(&c)
 	useDirect := flag.Bool("direct", false, "run the Port-Hopping Direct Channel instead of raw UDP")
 	directFlags(&d)
+	var rc peer.RelayConfig
+	useRelay := relayFlags(&rc)
 	keys := keyFlags()
 	genkey := flag.String("genkey", "", "write a new static keypair to `BASE`.key and BASE.pub, then exit")
 	quiet := flag.Bool("quiet", false, "no progress output on stderr")
@@ -50,6 +55,9 @@ func main() {
 			usage(err.Error())
 		}
 		c.Direct = &d
+	}
+	if *useRelay {
+		c.Relay = &rc
 	}
 	if !*quiet {
 		c.Logf = func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
@@ -89,6 +97,14 @@ func connectFlags(c *peer.Config) {
 	flag.DurationVar(&c.PunchInterval, "punch-interval", 50*time.Millisecond, "time between punch packets")
 	flag.DurationVar(&c.StepTimeout, "step-timeout", 10*time.Second, "wait this long for a member at each step of a link")
 	flag.DurationVar(&c.Linger, "linger", 500*time.Millisecond, "keep answering the peer this long before exiting")
+}
+
+func relayFlags(rc *peer.RelayConfig) *bool {
+	use := flag.Bool("relay", false, "relayed mode: every link goes through the TURN relay instead of a hole punch")
+	flag.StringVar(&rc.Server, "relay-server", "198.18.0.102:3478", "relay: the TURN server")
+	flag.StringVar(&rc.Username, "relay-user", "testbed", "relay: TURN username")
+	flag.StringVar(&rc.Password, "relay-pass", "testbed", "relay: TURN password")
+	return use
 }
 
 func measureFlags(c *peer.Config) {

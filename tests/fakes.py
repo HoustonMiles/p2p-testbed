@@ -34,6 +34,7 @@ class FakeTestbed:
         self.behaviour = kw.get("behaviour", {})        # peer -> (mapping, filtering), or a list of answers in turn
         self.running = kw.get("running", True)
         self.relay = kw.get("relay", True)              # the relay answers
+        self.stray = kw.get("stray", [])                # services of another stack, running too
         self.ups: list = []                             # every reconfiguration, in order
 
     @property
@@ -48,6 +49,9 @@ class FakeTestbed:
         if not self.running:
             return ["stun"]
         return ["stun", "relay"] + [f"{kind}-{n}" for n in self.names for kind in ("nat", "peer")]
+
+    def strays(self) -> list[str]:
+        return self.stray
 
     def running_peers(self) -> list[str]:
         return [s.removeprefix("peer-") for s in self.services() if s.startswith("peer-")]
