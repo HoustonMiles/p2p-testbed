@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"p2ptestbed/p2p/internal/direct"
+	"p2ptestbed/p2p/internal/noise"
 	"p2ptestbed/p2p/internal/wire"
 )
 
@@ -17,54 +17,40 @@ import (
 
 const ipUDPHeader = 28
 
-// measure runs steps 4 and 5.
-func (r *runner) measure() error {
-	if r.cfg.Pings > 0 {
-		r.pingPhase()
-		if err := r.barrier(stepPinged, 0, r.cfg.StepTimeout); err != nil {
-			return err
-		}
-	}
-	if r.cfg.RateMbit <= 0 {
-		return nil
-	}
-	if err := r.throughput(stepAtoB, 'a'); err != nil {
-		return err
-	}
-	return r.throughput(stepBtoA, 'b')
-}
-
-func (r *runner) pingPhase() {
-	sent := 0
-	r.pump(time.Duration(r.cfg.Pings+1)*r.cfg.PingInterval+r.cfg.StepTimeout, r.cfg.PingInterval,
+// ping runs step 4 on the link, then meets the member at a barrier.
+func (l *link) ping() {
+	c, sent := l.r.cfg, 0
+	l.pump(time.Duration(c.Pings+1)*c.PingInterval+c.StepTimeout, c.PingInterval,
 		func() {
-			if sent < r.cfg.Pings {
-				r.sendPeer(wire.Ping, uint64(sent), wire.U64(uint64(time.Since(r.t0))))
+			if sent < c.Pings {
+				l.send(wire.Ping, uint64(sent), wire.U64(uint64(time.Since(l.r.t0))))
 				sent++
 			}
 		},
-		func() bool { return sent >= r.cfg.Pings })
-	r.pump(r.cfg.PingGrace, 0, nil, func() bool { return len(r.rtts) >= r.cfg.Pings })
-	r.recordPings(sent)
+		func() bool { return sent >= c.Pings })
+	l.pump(c.PingGrace, 0, nil, func() bool { return len(l.rtts) >= c.Pings })
+	l.recordPings(sent)
+	l.barrier(barrierWait{step: stepPinged, timeout: c.StepTimeout})
 }
 
-func (r *runner) recordPings(sent int) {
-	r.res.PingsSent, r.res.PingsRecv = sent, len(r.rtts)
-	r.res.PingLoss = ptr(1 - float64(len(r.rtts))/float64(sent))
-	r.res.RTTs = make([]float64, 0, len(r.rtts))
+func (l *link) recordPings(sent int) {
+	res := &l.res
+	res.PingsSent, res.PingsRecv = sent, len(l.rtts)
+	res.PingLoss = ptr(1 - float64(len(l.rtts))/float64(sent))
+	res.RTTs = make([]float64, 0, len(l.rtts))
 	for seq := uint64(0); seq < uint64(sent); seq++ {
-		if v, ok := r.rtts[seq]; ok {
-			r.res.RTTs = append(r.res.RTTs, v)
+		if v, ok := l.rtts[seq]; ok {
+			res.RTTs = append(res.RTTs, v)
 		}
 	}
-	if len(r.res.RTTs) == 0 {
+	if len(res.RTTs) == 0 {
 		return
 	}
-	setRTTStats(r.res, r.res.RTTs)
-	r.logf("ping: %d/%d replies, median %.2f ms", len(r.res.RTTs), sent, *r.res.RTTP50)
+	setRTTStats(res, res.RTTs)
+	l.logf("ping: %d/%d replies, median %.2f ms", len(res.RTTs), sent, *res.RTTP50)
 }
 
-func setRTTStats(res *Result, samples []float64) {
+func setRTTStats(res *LinkResult, samples []float64) {
 	s := append([]float64(nil), samples...)
 	sort.Float64s(s)
 	mean := 0.0
@@ -83,61 +69,85 @@ func setRTTStats(res *Result, samples []float64) {
 	}
 }
 
+func (l *link) onPing(m inbound) { l.reply(m, wire.Pong, m.pkt.Seq, m.pkt.Body) }
+
+func (l *link) onPong(m inbound) {
+	sentAt := time.Duration(wire.ParseU64(m.pkt.Body))
+	if _, dup := l.rtts[m.pkt.Seq]; !dup && m.pkt.Seq < uint64(l.r.cfg.Pings) {
+		l.rtts[m.pkt.Seq] = ms(m.at - sentAt)
+	}
+}
+
+// throughputTest runs both directions on this link once the member is at
+// this pair too; it may first be bringing up its links and testing pairs
+// earlier in the order, which the wait allows for. Nothing is sent before
+// both sides are ready, so no two tests share a peer's link capacity.
+func (l *link) throughputTest() {
+	r := l.r
+	testTime := 2*(r.cfg.Duration+r.cfg.Drain) + 2*time.Second
+	ready := barrierWait{step: stepTestReady, timeout: r.cfg.StepTimeout + r.setupTime() + time.Duration(l.pairsAhead())*testTime}
+	if !l.barrier(ready) {
+		return
+	}
+	first := r.id < l.peerID
+	if l.throughput(stepFirstSend, first) {
+		l.throughput(stepSecondSend, !first)
+	}
+}
+
 // throughput runs one direction. The receiver waits at the barrier while
 // the sender sends; the barrier value carries how many packets were sent.
-func (r *runner) throughput(step uint64, sender byte) error {
+func (l *link) throughput(step uint64, weSend bool) bool {
+	r := l.r
 	var sent uint64
-	if sender == r.cfg.Role {
-		sent = r.sendData()
+	if weSend {
+		sent = l.sendData()
 	}
-	if err := r.barrier(step, sent, r.cfg.Duration+r.cfg.StepTimeout); err != nil {
-		return err
+	if !l.barrier(barrierWait{step: step, value: sent, timeout: r.cfg.Duration + r.cfg.StepTimeout}) {
+		return false
 	}
-	r.pump(r.cfg.Drain, 0, nil, never)
-	if sender != r.cfg.Role {
-		r.recordRx(int64(r.peerValue[step]))
+	l.pump(r.cfg.Drain, 0, nil, never)
+	if !weSend {
+		l.recordRx(int64(l.peerValue[step]))
 	}
-	return nil
+	return true
 }
 
 // sendData paces Size-byte Data packets against the clock every
 // millisecond, so the average rate stays exact.
-func (r *runner) sendData() uint64 {
+func (l *link) sendData() uint64 {
+	r := l.r
 	size := max(r.cfg.Size, wire.HeaderLen)
 	pps := r.cfg.RateMbit * 1e6 / float64(size*8)
-	pkt := wire.Packet{Type: wire.Data, Role: r.cfg.Role, Session: r.cfg.Session,
+	pkt := wire.Packet{Type: wire.Data, Room: r.cfg.Room, From: r.id,
 		Body: make([]byte, size-wire.HeaderLen)}.Append(nil)
 	var sent uint64
 	start := time.Now()
-	r.pump(r.cfg.Duration+time.Second, time.Millisecond,
+	l.pump(r.cfg.Duration+time.Second, time.Millisecond,
 		func() {
 			due := uint64(math.Min(time.Since(start).Seconds(), r.cfg.Duration.Seconds()) * pps)
 			for ; sent < due; sent++ {
-				putSeq(pkt, sent)
-				r.sendDataPacket(pkt)
+				wire.PutSeq(pkt, sent)
+				l.sendDataPacket(pkt)
 			}
 		},
 		func() bool { return time.Since(start) >= r.cfg.Duration })
 	elapsed := time.Since(start).Seconds()
-	r.res.TxPackets = ptr(int64(sent))
-	r.res.TxMbit = ptr(float64(sent) * float64(size) * 8 / elapsed / 1e6)
-	r.logf("throughput: sent %d packets (%.2f Mbit/s)", sent, *r.res.TxMbit)
+	l.res.TxPackets = ptr(int64(sent))
+	l.res.TxMbit = ptr(float64(sent) * float64(size) * 8 / elapsed / 1e6)
+	l.logf("throughput: sent %d packets (%.2f Mbit/s)", sent, *l.res.TxMbit)
 	return sent
 }
 
 // sendDataPacket sends one Data packet; errors count as loss.
-func (r *runner) sendDataPacket(pkt []byte) {
-	if r.hopper != nil {
-		r.hopper.Send(pkt)
-	} else {
-		r.conn.WriteToUDPAddrPort(pkt, r.remote)
-	}
-}
-
-// putSeq writes seq into the header's sequence field (bytes 16-23).
-func putSeq(pkt []byte, seq uint64) {
-	for i := 0; i < 8; i++ {
-		pkt[16+i] = byte(seq >> (56 - 8*i))
+func (l *link) sendDataPacket(pkt []byte) {
+	switch {
+	case l.hopper != nil:
+		l.hopper.Send(pkt)
+	case l.r.relay != nil:
+		l.transmit(l.seal(pkt))
+	default:
+		l.r.conn.WriteToUDPAddrPort(pkt, l.remote)
 	}
 }
 
@@ -146,24 +156,28 @@ type rxCounts struct {
 	first, last    time.Duration
 }
 
-func (r *runner) countData(at time.Duration, n int) {
-	r.rxMu.Lock()
-	defer r.rxMu.Unlock()
-	if r.rx.packets == 0 {
-		r.rx.first = at
+func (l *link) countData(at time.Duration, n int) {
+	l.rxMu.Lock()
+	defer l.rxMu.Unlock()
+	if l.rx.packets == 0 {
+		l.rx.first = at
 	}
-	r.rx.packets++
-	r.rx.bytes += int64(n)
-	r.rx.last = at
+	l.rx.packets++
+	l.rx.bytes += int64(n)
+	l.rx.last = at
 }
 
-func (r *runner) recordRx(peerSent int64) {
-	r.rxMu.Lock()
-	rx := r.rx
-	r.rxMu.Unlock()
-	r.res.RxPackets, r.res.RxPeerSent = ptr(rx.packets), ptr(peerSent)
+func (l *link) recordRx(peerSent int64) {
+	l.rxMu.Lock()
+	rx := l.rx
+	l.rxMu.Unlock()
+	res := &l.res
+	res.RxPackets, res.RxPeerSent = ptr(rx.packets), ptr(peerSent)
 	if peerSent > 0 {
-		r.res.RxLoss = ptr(1 - float64(rx.packets)/float64(peerSent))
+		res.RxLoss = ptr(1 - float64(rx.packets)/float64(peerSent))
+	}
+	if rx.packets > 0 {
+		res.RxStartMs, res.RxEndMs = ptr(ms(rx.first)), ptr(ms(rx.last))
 	}
 	window := (rx.last - rx.first).Seconds()
 	if rx.packets < 2 || window <= 0 {
@@ -171,17 +185,26 @@ func (r *runner) recordRx(peerSent int64) {
 	}
 	// n packets span n-1 gaps, so count n-1 packets' worth.
 	frac := float64(rx.packets-1) / float64(rx.packets)
-	r.res.RxMbit = ptr(float64(rx.bytes) * frac * 8 / window / 1e6)
-	r.res.RxIPMbit = ptr(float64(rx.bytes+rx.packets*r.headerBytes()) * frac * 8 / window / 1e6)
-	r.logf("throughput: received %d/%d packets, %.2f Mbit/s", rx.packets, peerSent, *r.res.RxMbit)
+	res.RxMbit = ptr(float64(rx.bytes) * frac * 8 / window / 1e6)
+	res.RxIPMbit = ptr(float64(rx.bytes+rx.packets*l.headerBytes()) * frac * 8 / window / 1e6)
+	l.logf("throughput: received %d/%d packets, %.2f Mbit/s", rx.packets, peerSent, *res.RxMbit)
 }
 
-func (r *runner) headerBytes() int64 {
-	if r.hopper != nil {
-		return ipUDPHeader + direct.Overhead
+// headerBytes is what each Data packet carries on the wire besides its
+// payload: IP and UDP, plus Noise's header and tag when sealed, plus
+// ChannelData's 4 bytes when it came through the relay.
+func (l *link) headerBytes() int64 {
+	n := int64(ipUDPHeader)
+	if l.hopper != nil || l.sealed.Load() != nil {
+		n += noise.Overhead
 	}
-	return ipUDPHeader
+	if l.r.relay != nil {
+		n += channelDataHeader
+	}
+	return n
 }
+
+const channelDataHeader = 4
 
 func percentile(sorted []float64, p float64) float64 {
 	k := float64(len(sorted)-1) * p / 100
@@ -189,8 +212,3 @@ func percentile(sorted []float64, p float64) float64 {
 	hi := min(lo+1, len(sorted)-1)
 	return sorted[lo] + (sorted[hi]-sorted[lo])*(k-float64(lo))
 }
-
-func ms(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
-
-func ptr[T any](v T) *T { return &v }
-

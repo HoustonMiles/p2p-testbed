@@ -28,8 +28,8 @@ verify_nat = true
 [params]
 timeout_s = 60
 est_trial_s = 16
-cmd_a = "punch -role a -session $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
-cmd_b = "punch -role b -session $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
+cmd_a = "punch -name a -room $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
+cmd_b = "punch -name b -room $seed -quiet -direct -hop-force -hop-interval 1s -pings 100 -ping-interval 50ms -rate-mbit 0"
 
 [matrix]
 net_profile = ["coast"]
@@ -69,4 +69,3 @@ name = "symmetric-restricted-wan"
 nat_a = "symmetric"
 nat_b = "restricted"
 upstream_b = "wan"
-

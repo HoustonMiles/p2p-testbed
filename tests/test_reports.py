@@ -116,10 +116,68 @@ class CompareTest(unittest.TestCase):
         self.assertIn("1>1", out)
         self.assertIn("48.00 > 47.00", out)
 
+    def test_relayed_trials_count_when_both_sides_are_ready(self):
+        base = self.folders.write("base", [trial("c00-aaa111", **sides(punched=True, direct=True, hop_connected=True,
+                                                                      rtt_ms_p50=70.0))])
+        new = self.folders.write("new", [
+            trial("c00-aaa111", **sides(relayed=True, direct=True, ready_ms=300.0, rtt_ms_p50=71.0)),
+            trial("c00-aaa111", **sides(relayed=True, direct=True, ready_ms=None, rtt_ms_p50=900.0)),
+        ])
+        out = report(reports.compare, base, [new])
+        self.assertIn("1>1", out)
+        self.assertIn("70.00 > 71.00", out)
+
+    def test_ignore_lines_up_configurations_that_differ_in_one_setting(self):
+        base = self.folders.write("base", [trial("c00-aaa111", **sides(punched=True, rtt_ms_p50=70.0))])
+        new = self.folders.write("new", [
+            trial("c00-bbb222", relay_delay_ms="10", **sides(punched=True, rtt_ms_p50=90.0)),
+            trial("c01-ccc333", relay_delay_ms="40", **sides(punched=True, rtt_ms_p50=150.0)),
+        ])
+        self.assertEqual(report_code(reports.compare, base, [new]), 1)  # nothing in common by ID
+        out = report(reports.compare, base, [new], ("relay_delay_ms",))
+        self.assertIn("relay_delay_ms=10", out)
+        self.assertIn("70.00 > 150.00", out)
+
     def test_no_common_configurations(self):
         base = self.folders.write("base", [trial("c00-aaa111")])
         new = self.folders.write("new", [trial("c00-bbb222")])
         self.assertEqual(report_code(reports.compare, base, [new]), 1)
+
+
+
+class MeshReportTest(unittest.TestCase):
+    def setUp(self):
+        self.folders = ResultFolders()
+
+    def tearDown(self):
+        self.folders.cleanup()
+
+    def mesh_trial(self, config_id: str, label: str, **columns) -> dict:
+        row = {"config_id": config_id, "config_label": label, "ok": True, "pairs": 6, "pairs_usable": 6,
+               "pairs_as_predicted": 6, "time_to_usable_ms": 400.0, "time_to_full_mesh_ms": 400.0,
+               "join_ms_p50": 300.0}
+        row.update(columns)
+        return row
+
+    def columns(self, out: str, label_words: int) -> list[dict]:
+        rows = []
+        for line in out.splitlines()[1:]:
+            values = line.split()
+            rows.append(dict(zip(reports.MESH_HEADER[1:], values[label_words:])))
+        return rows
+
+    def test_full_and_partial_meshes(self):
+        run = self.folders.write("mesh", [
+            self.mesh_trial("c00-aaa111", "peers=4"),
+            self.mesh_trial("c00-aaa111", "peers=4", time_to_usable_ms=600.0, time_to_full_mesh_ms=600.0),
+            self.mesh_trial("c01-bbb222", "peers=4b", ok=False, pairs_usable=4, pairs_as_predicted=5,
+                            time_to_full_mesh_ms=None),
+        ])
+        full, partial = self.columns(report(reports.mesh, [run]), 1)
+        self.assertEqual((full["n"], full["full"], full["ready_p50_ms"], full["ready_max_ms"], full["join_p50_ms"],
+                          full.get("!")), ("2", "1.00", "500.00", "600.00", "300.00", None))
+        self.assertEqual((partial["ok"], partial["usable"], partial["as_predicted"], partial["full"], partial["!"]),
+                         ("0.000", "4.00", "0.833", "0.000", "!"))
 
 
 if __name__ == "__main__":

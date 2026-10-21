@@ -8,12 +8,15 @@ Reports on finished runs.
       Two runs of the same configurations side by side, e.g. punch_path
       (raw) against direct_path (Noise + hopping) for Experiment B.
 
-Both run with plain python3 as well: standard library only.
+  uv run python -m p2prunner mesh RUN [RERUN ...]
+      Mesh trials: how much of each mesh came up, as predicted, how fast.
+
+All run with plain python3 as well: standard library only.
 """
 
 from __future__ import annotations
 
-from p2prunner.results import (both, by_config, fmt, label, load_run, load_runs, median, number,
+from p2prunner.results import (both, by_config, config_key, fmt, label, load_run, load_runs, median, number,
                                print_table, share, side_values)
 
 # =============================================================================
@@ -85,38 +88,56 @@ METRICS = [
 ]
 
 
-def compare(base_path: str, new_paths: list[str]) -> int:
+def compare(base_path: str, new_paths: list[str], ignore: tuple[str, ...] = ()) -> int:
     """Per configuration in both runs, the median over both sides of each
     metric, as BASE > NEW, counting only trials where the path was up. The
-    last line is the median of the per-configuration changes."""
-    base, new = by_config(load_run(base_path)), by_config(load_runs(new_paths))
-    common = [k for k in base if k in new]
-    if not common:
+    last line is the median of the per-configuration changes. With ignore,
+    each NEW configuration is matched with the BASE one that differs only
+    in those settings."""
+    base = by_config(load_run(base_path), ignore)
+    matched = match(base, load_runs(new_paths), ignore)
+    if not matched:
         print("No configurations in common (are these runs of the same settings?)")
         return 1
-    up = {k: ([r for r in base[k] if path_up(r)], [r for r in new[k] if path_up(r)]) for k in common}
-    metrics = [m for m in METRICS if any(side_values(b + n, m[0]) for b, n in up.values())]
-    rows, changes = compare_rows(base, up, metrics)
+    up = [(b, [r for r in b if path_up(r)], [r for r in n if path_up(r)], ignored(n[0], ignore)) for b, n in matched]
+    metrics = [m for m in METRICS if any(side_values(b_up + n_up, m[0]) for _, b_up, n_up, _ in up)]
+    rows, changes = compare_rows(up, metrics)
     print_table(["config", "n"] + [m[1] for m in metrics], rows, pooled_row(metrics, changes))
     print("\nn = trials with the path up (BASE > NEW); cells are medians over both sides, BASE > NEW.")
-    if skipped := len(base) - len(common):
+    if skipped := len(base) - len({id(b) for b, _ in matched}):
         print(f"{skipped} BASE configurations not in NEW (skipped).")
     return 0
 
 
+def match(base: dict, new_rows: list[dict], ignore: tuple[str, ...]) -> list[tuple[list, list]]:
+    """(BASE trials, NEW trials) for each NEW configuration that has a BASE one."""
+    groups = by_config(new_rows).values()
+    return [(base[key], trials) for trials in groups if (key := config_key(trials[0], ignore)) in base]
+
+
+def ignored(row: dict, ignore: tuple[str, ...]) -> str:
+    """The NEW configuration's values of the ignored settings, for its label."""
+    return "".join(f" {k}={row[k]}" for k in ignore if k in row)
+
+
 def path_up(row: dict) -> bool:
-    """Both sides punched, and in direct mode the first hop worked both ways."""
-    if not (row.get("ok") and both(row, "punched")):
+    """Both sides punched, and in direct mode the first hop worked both
+    ways; relayed, both sides ready through the relay."""
+    if not row.get("ok"):
+        return False
+    if row.get("a_relayed") or row.get("b_relayed"):
+        return number(row, "a_ready_ms") is not None and number(row, "b_ready_ms") is not None
+    if not both(row, "punched"):
         return False
     if row.get("a_direct") or row.get("b_direct"):
         return both(row, "hop_connected")
     return True
 
 
-def compare_rows(base: dict, up: dict, metrics: list) -> tuple[list[list[str]], dict[str, list[float]]]:
+def compare_rows(up: list, metrics: list) -> tuple[list[list[str]], dict[str, list[float]]]:
     rows, changes = [], {m[0]: [] for m in metrics}
-    for key, (b_up, n_up) in up.items():
-        row = [label(base[key][0]), f"{len(b_up)}>{len(n_up)}"]
+    for base, b_up, n_up, extra in up:
+        row = [label(base[0]) + extra, f"{len(b_up)}>{len(n_up)}"]
         for column, _, _ in metrics:
             bm, nm = median(side_values(b_up, column)), median(side_values(n_up, column))
             if bm is not None and nm is not None:
@@ -132,3 +153,46 @@ def pooled_row(metrics: list, changes: dict[str, list[float]]) -> list[str]:
         m = median(changes[column])
         row.append("-" if m is None else f"{'+' if m >= 0 else ''}{fmt(m)} {unit}".strip())
     return row
+
+
+# =============================================================================
+# mesh
+# =============================================================================
+MESH_HEADER = ["config", "n", "ok", "pairs", "usable", "as_predicted", "full", "ready_p50_ms", "ready_max_ms",
+               "join_p50_ms", "!"]
+
+
+def mesh(paths: list[str]) -> int:
+    """Per configuration: the share of trials that ran cleanly (ok), pairs
+    per mesh and the median that came up usable, the share of all pairs
+    whose outcome RFC 4787 predicts (as_predicted), the share of trials that
+    formed a full mesh, how long the usable pairs took to be ready
+    (time_to_usable_ms, from the first peer's start), and the median time
+    a peer took to join the members already running (join_ms_p50). "!"
+    marks a configuration where some pair did not do as predicted.
+    Configurations come in the experiment's order."""
+    groups = sorted(by_config(load_runs(paths)).values(), key=lambda trials: trials[0]["config_id"])
+    print_table(MESH_HEADER, [mesh_row(trials) for trials in groups])
+    return 0
+
+
+def mesh_row(trials: list[dict]) -> list[str]:
+    pairs = sum(r.get("pairs", 0) for r in trials)
+    predicted = sum(r.get("pairs_as_predicted", 0) for r in trials)
+    ready = sorted(column(trials, "time_to_usable_ms"))
+    return [
+        trials[0].get("config_label", trials[0]["config_id"]), str(len(trials)),
+        fmt(share([bool(r.get("ok")) for r in trials])),
+        str(trials[0].get("pairs", "-")),
+        fmt(median(column(trials, "pairs_usable"))),
+        fmt(predicted / pairs if pairs else None),
+        fmt(share([r.get("time_to_full_mesh_ms") is not None for r in trials])),
+        fmt(median(ready)), fmt(ready[-1] if ready else None),
+        fmt(median(column(trials, "join_ms_p50"))),
+        "!" if predicted != pairs else "",
+    ]
+
+
+def column(trials: list[dict], name: str) -> list[float]:
+    """The numbers in one column of the trials, skipping the missing."""
+    return [v for r in trials if (v := number(r, name)) is not None]

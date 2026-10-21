@@ -5,8 +5,9 @@ Testbed checks: the smoke test and the RFC 5780 NAT verification.
   uv run python -m p2prunner verify         # NAT behaviour of the running testbed (~10 s)
   uv run python -m p2prunner verify --all   # every NAT type, as home router and as CGN (~1 min)
 
-The NAT expectations and the measurement are the ones the `nat_verify`
-trial uses, so these checks and the experiments can never disagree.
+They check every peer that is running, however many. The NAT expectations
+and the measurement are the ones the `nat_verify` trial uses, so these
+checks and the experiments can never disagree.
 """
 
 from __future__ import annotations
@@ -14,17 +15,13 @@ from __future__ import annotations
 import re
 import subprocess
 
-from p2prunner.experiment import FACTORS, Config
+from p2prunner import topology
+from p2prunner.topology import RELAY_IP
+from p2prunner.experiment import Config, resolve
 from p2prunner.testbed import Testbed, TestbedError
-from p2prunner.trials import STUN_IP, expected_behaviour, measure_behaviour
+from p2prunner.nat import expected_behaviour
+from p2prunner.trials import STUN_IP, measure_all
 
-# TODO(paper §5 Simulation Environment): these mirror docker-compose.yml;
-# read them from there so the addresses are defined once.
-SIDES = {
-    "a": {"peer": "192.168.10.10", "wan": "203.0.113.10", "cgn_wan": "203.0.113.11"},
-    "b": {"peer": "192.168.20.10", "wan": "203.0.113.20", "cgn_wan": "203.0.113.21"},
-}
-REQUIRED = ("nat-a", "nat-b", "peer-a", "peer-b", "stun")
 TYPES = ("full_cone", "restricted", "port_restricted", "symmetric")
 
 
@@ -57,29 +54,34 @@ def preflight(tb: Testbed, need_running: bool = True) -> str | None:
         return "Cannot run docker. Is it installed?"
     if not need_running:
         return None
-    running = tb.compose("ps", "--status", "running", "--services").stdout.split()
-    missing = [s for s in REQUIRED if s not in running]
+    running = tb.services()
+    missing = [s for s in ("stun", "relay", "peer-a", "nat-a", "peer-b", "nat-b") if s not in running]
+    missing += [f"nat-{p}" for p in tb.running_peers() if f"nat-{p}" not in running]
     if missing:
         return (f"Not running: {', '.join(missing)}. Start the testbed first:\n"
-                "  docker compose up -d --build --wait")
+                "  docker compose up -d --build --wait   (or: p2prunner up --peers N)")
+    if strays := tb.strays():
+        return (f"Containers of another stack are running too: {', '.join(strays)}.\n"
+                "Start clean: uv run python -m p2prunner down, then docker compose up -d --wait")
     return None
 
 
 def running_config(tb: Testbed) -> Config:
     """The configuration the testbed is running now, read from the routers."""
-    factors = {key: default for key, (_, default) in FACTORS.items()}
-    for side in "ab":
-        nat_type, upstream = tb.sh(f"nat-{side}", "echo $NAT_TYPE $UPSTREAM").stdout.split()
-        factors[f"nat_{side}"], factors[f"upstream_{side}"] = nat_type, upstream
+    names = tb.running_peers()
+    settings: dict = {"peers": len(names)}
+    for name in names:
+        nat_type, upstream = tb.sh(f"nat-{name}", "echo $NAT_TYPE $UPSTREAM").stdout.split()
+        settings[f"nat_{name}"], settings[f"upstream_{name}"] = nat_type, upstream
         if upstream == "cgnat":
-            factors[f"cgn_{side}"] = tb.sh(f"cgn-{side}", "echo $NAT_TYPE").stdout.strip()
-    return Config(index=0, factors=factors, bundles={})
+            settings[f"cgn_{name}"] = tb.sh(f"cgn-{name}", "echo $NAT_TYPE").stdout.strip()
+    return Config(index=0, factors=resolve(settings), bundles={})
 
 
-def describe(cfg: Config, side: str) -> str:
-    desc = cfg.factors[f"nat_{side}"]
-    if cfg.factors[f"upstream_{side}"] == "cgnat":
-        desc += f" behind CGN {cfg.factors[f'cgn_{side}']}"
+def describe(cfg: Config, name: str) -> str:
+    desc = cfg.factors[f"nat_{name}"]
+    if cfg.factors[f"upstream_{name}"] == "cgnat":
+        desc += f" behind CGN {cfg.factors[f'cgn_{name}']}"
     return desc
 
 
@@ -87,46 +89,57 @@ def describe(cfg: Config, side: str) -> str:
 # smoke
 # =============================================================================
 def smoke(tb: Testbed) -> int:
-    """For each side: the peer reaches the WAN, STUN sees the expected public
-    IP (so NAT happened), and a WAN host cannot route around the NAT."""
+    """For each peer: it reaches the WAN, STUN sees the expected public IP
+    (so NAT happened), and a WAN host cannot route around the NAT. Then the
+    relay: peer a reaches it, and it too sees a's public IP."""
     cfg = running_config(tb)
     report = Report()
-    for side in "ab":
-        print(f"Side {side.upper()}: {describe(cfg, side)}")
-        public = expected_public_ip(cfg, side)
-        check_stun(tb, side, public, report)
-        check_no_bypass(tb, side, public, report)
+    for p in cfg.peers:
+        print(f"Peer {p.name}: {describe(cfg, p.name)}")
+        public = p.public_ip(cfg.factors[f"upstream_{p.name}"] == "cgnat")
+        check_stun(tb, p.name, public, report)
+        check_no_bypass(tb, p, public, report)
+    print("Relay")
+    check_relay(tb, cfg.peers[0].public_ip(cfg.factors["upstream_a"] == "cgnat"), report)
     return report.finish("All checks passed.")
 
 
-def expected_public_ip(cfg: Config, side: str) -> str:
-    key = "cgn_wan" if cfg.factors[f"upstream_{side}"] == "cgnat" else "wan"
-    return SIDES[side][key]
-
-
-def check_stun(tb: Testbed, side: str, public: str, report: Report) -> None:
-    # The client goes on to RFC 5780 requests a filtering NAT may rightly
-    # block, so its run time is capped and only the first reply is read.
-    out = tb.sh(f"peer-{side}", f"timeout 3 turnutils_stunclient {STUN_IP} 2>/dev/null").stdout
-    m = re.search(r"UDP reflexive addr: *([0-9.]+):([0-9]+)", out)
-    if not m:
-        report.check(False, f"peer-{side} got no STUN reply")
+def check_stun(tb: Testbed, name: str, public: str, report: Report) -> None:
+    seen = seen_as(tb, name, STUN_IP)
+    if seen is None:
+        report.check(False, f"peer-{name} got no STUN reply")
         return
-    seen = f"{m.group(1)}:{m.group(2)}"
-    report.check(m.group(1) == public, f"STUN sees peer-{side} as {seen} (expected IP {public})")
+    report.check(seen.split(":")[0] == public, f"STUN sees peer-{name} as {seen} (expected IP {public})")
 
 
-def check_no_bypass(tb: Testbed, side: str, public: str, report: Report) -> None:
+def check_relay(tb: Testbed, public_a: str, report: Report) -> None:
+    """The relay answers STUN without a login, so the same request shows
+    that peer a reaches it through its NATs."""
+    seen = seen_as(tb, "a", RELAY_IP)
+    if seen is None:
+        report.check(False, f"peer-a got no reply from the relay ({RELAY_IP})")
+        return
+    report.check(seen.split(":")[0] == public_a, f"the relay sees peer-a as {seen} (expected IP {public_a})")
+
+
+def seen_as(tb: Testbed, name: str, server: str) -> str | None:
+    """The peer's address as a STUN server sees it, or None if it got no
+    reply. The client goes on to RFC 5780 requests a filtering NAT may
+    rightly block, so its run time is capped and only the first reply is read."""
+    out = tb.sh(f"peer-{name}", f"timeout 3 turnutils_stunclient {server} 2>/dev/null").stdout
+    m = re.search(r"UDP reflexive addr: *([0-9.]+:[0-9]+)", out)
+    return m.group(1) if m else None
+
+
+def check_no_bypass(tb: Testbed, p: topology.Peer, public: str, report: Report) -> None:
     """Route the peer's private subnet via its public IP from the STUN host
     and ping the peer: the NAT must drop it."""
-    peer = SIDES[side]["peer"]
-    subnet = peer.rsplit(".", 1)[0] + ".0/24"
-    if tb.exec("stun", ["ip", "route", "replace", subnet, "via", public]).returncode != 0:
+    if tb.exec("stun", ["ip", "route", "replace", p.lan_subnet, "via", public]).returncode != 0:
         report.check(False, "could not add the test route on the STUN host (check skipped)")
         return
-    reached = tb.exec("stun", ["ping", "-c", "1", "-W", "1", peer]).returncode == 0
-    tb.exec("stun", ["ip", "route", "del", subnet])
-    report.check(not reached, f"WAN host cannot reach private {peer} directly")
+    reached = tb.exec("stun", ["ping", "-c", "1", "-W", "1", p.peer_ip]).returncode == 0
+    tb.exec("stun", ["ip", "route", "del", p.lan_subnet])
+    report.check(not reached, f"WAN host cannot reach private {p.peer_ip} directly")
 
 
 # =============================================================================
@@ -143,32 +156,39 @@ def verify(tb: Testbed, every_type: bool) -> int:
 
 def verify_running(tb: Testbed, cfg: Config, report: Report) -> None:
     raw: dict = {}
-    measured = tb.parallel({s: (lambda s=s: measure_behaviour(tb, s, raw)) for s in "ab"})
-    for side in "ab":
-        exp_m, exp_f = expected_behaviour(cfg, side)
-        got_m, got_f = measured[side]
+    names = [p.name for p in cfg.peers]
+    measured = measure_all(tb, names, raw)
+    for name in names:
+        exp_m, exp_f = expected_behaviour(cfg, name)
+        got_m, got_f = measured[name]
         detail = f"mapping={got_m} filtering={got_f}"
         if (got_m, got_f) != (exp_m, exp_f):
             detail += f" (expected {exp_m}/{exp_f})"
-        report.check((got_m, got_f) == (exp_m, exp_f), f"side {side.upper()}  {describe(cfg, side):<46} {detail}")
+        report.check((got_m, got_f) == (exp_m, exp_f), f"peer {name:<3} {describe(cfg, name):<46} {detail}")
+
+
+def every_type_config() -> Config:
+    """Eight peers in one configuration: each NAT type as a home router on
+    the WAN (a-d), and as a CGN behind a full cone home router, so that the
+    CGN decides (e-h)."""
+    settings: dict = {"peers": 2 * len(TYPES)}
+    for i, nat_type in enumerate(TYPES):
+        home, behind = topology.peer_name(i + 1), topology.peer_name(len(TYPES) + i + 1)
+        settings[f"nat_{home}"] = nat_type
+        settings.update({f"nat_{behind}": "full_cone", f"upstream_{behind}": "cgnat", f"cgn_{behind}": nat_type})
+    return Config(index=0, factors=resolve(settings), bundles={})
 
 
 def verify_every_type(tb: Testbed, report: Report) -> None:
-    """Each NAT type twice per run: as side A's home router, and as side B's
-    CGN behind a full cone home router (so the CGN decides)."""
-    for nat_type in TYPES:
-        print(f"Configuration: {nat_type}")
-        factors = {key: default for key, (_, default) in FACTORS.items()}
-        factors.update(nat_a=nat_type, upstream_a="wan", nat_b="full_cone",
-                       upstream_b="cgnat", cgn_b=nat_type)
-        cfg = Config(index=0, factors=factors, bundles={})
-        try:
-            tb.up(cfg.env)
-        except TestbedError:
-            report.check(False, "testbed did not start (see: docker compose logs)")
-            continue
-        verify_running(tb, cfg, report)
-    # Plain `up`, not tb.up, so the user's .env settings come back.
+    cfg = every_type_config()
+    print(f"Every NAT type at once: {len(cfg.peers)} peers")
+    try:
+        tb.up(cfg)
+    except TestbedError as e:
+        report.check(False, f"testbed did not start: {str(e).strip().splitlines()[-1]}")
+        return
+    verify_running(tb, cfg, report)
+    # Back to the committed stack, with the user's .env settings.
     print("Restoring the default configuration...")
-    tb.compose("up", "-d", "--wait", "--force-recreate", timeout=300)
-
+    tb.down()
+    tb.compose("up", "-d", "--wait", timeout=300)

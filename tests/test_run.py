@@ -30,7 +30,8 @@ class FakeTestbed:
     def versions(self):
         return {"git_dirty": False}
 
-    def up(self, env):
+    def up(self, cfg):
+        env = cfg.env
         if self.fail_up:
             raise TestbedError("compose failed")
         self.started.append(env["NET_PROFILE"])
@@ -122,6 +123,22 @@ class RunTest(unittest.TestCase):
             raise RuntimeError("bad output")
         self.assertEqual(self.run_cli(FakeTestbed(), broken), 0)
         self.assertTrue(all("RuntimeError: bad output" in r["error"] for r in self.rows()))
+
+    def test_links_go_to_their_own_file(self):
+        def linking(tb, cfg, params, ctx):
+            ctx.links.extend([{"peer": "a", "member": "b"}, {"peer": "b", "member": "a"}])
+            return {"ok": True}
+        self.run_cli(FakeTestbed(), linking)
+        links = [json.loads(line) for line in (self.run_dir() / "links.jsonl").read_text().splitlines()]
+        self.assertEqual(len(links), 16)
+        trials = {(r["config_id"], r["trial"], r["seed"]) for r in self.rows()}
+        self.assertEqual({(r["config_id"], r["trial"], r["seed"]) for r in links}, trials)
+
+    def test_resume_drops_the_links_of_an_unfinished_trial(self):
+        store = cli.ResultStore(self.root)
+        store.add_links([{"config_id": "c0", "trial": 0}, {"config_id": "c0", "trial": 1}])
+        store.drop_unfinished_links({("c0", 0)})
+        self.assertEqual(store.links_path.read_text(), json.dumps({"config_id": "c0", "trial": 0}) + "\n")
 
     def test_unknown_trial_type(self):
         self.exp_file.write_text(EXPERIMENT.replace('"fake"', '"nope"'))

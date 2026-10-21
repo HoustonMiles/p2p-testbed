@@ -31,8 +31,8 @@ verify_nat = true
 [params]
 timeout_s = 90
 est_trial_s = 15
-cmd_a = "punch -role a -session $seed -quiet -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
-cmd_b = "punch -role b -session $seed -quiet -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+cmd_a = "punch -name a -room $seed -quiet -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+cmd_b = "punch -name b -room $seed -quiet -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
 
 [matrix]
 net_profile = ["local", "coast", "transatlantic"]

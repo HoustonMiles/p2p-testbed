@@ -32,10 +32,10 @@ verify_nat = true         # RFC 5780 check each time a configuration starts
 [params]
 timeout_s = 60            # whole trial; the tool's own timeouts end well before this
 est_trial_s = 6           # for `plan` time estimates (failed punches take ~11 s)
-# $seed is the same for both peers in a trial, so it doubles as the session ID.
+# $seed is the same for both peers in a trial, so it doubles as the room.
 # Throughput is skipped here (-rate-mbit 0); see punch_path.toml.
-cmd_a = "punch -role a -session $seed -quiet -pings 20 -ping-interval 50ms -rate-mbit 0"
-cmd_b = "punch -role b -session $seed -quiet -pings 20 -ping-interval 50ms -rate-mbit 0"
+cmd_a = "punch -name a -room $seed -quiet -pings 20 -ping-interval 50ms -rate-mbit 0"
+cmd_b = "punch -name b -room $seed -quiet -pings 20 -ping-interval 50ms -rate-mbit 0"
 
 [matrix]
 nat_a = ["full_cone", "restricted", "port_restricted", "symmetric"]

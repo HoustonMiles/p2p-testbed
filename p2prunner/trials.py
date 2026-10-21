@@ -15,10 +15,11 @@ It returns a flat dict of metrics. The key "ok" (True/False) says whether
 the trial succeeded; any other keys become columns in the results.
 
 Available types:
-  nat_verify  RFC 5780 mapping/filtering check from both peers
+  nat_verify  RFC 5780 mapping/filtering check from every peer
   ping        round-trip time from each peer to a WAN host, through NAT + shaping
   command     run your own command on peer-a and/or peer-b (the hook for the
               Go client); each prints one JSON line of results at the end
+  mesh        punch on every peer at once, one full mesh (see mesh.py)
 """
 
 from __future__ import annotations
@@ -29,7 +30,8 @@ import statistics
 from dataclasses import dataclass, field
 from string import Template
 
-STUN_IP = "203.0.113.100"
+from p2prunner.nat import expected_behaviour
+from p2prunner.topology import STUN_IP
 
 
 @dataclass
@@ -37,6 +39,14 @@ class TrialContext:
     trial: int                    # trial number within its configuration (0-based)
     seed: int                     # random seed for this trial
     raw: dict = field(default_factory=dict)
+    links: list = field(default_factory=list)  # rows for links.jsonl (mesh trials)
+
+
+def fill(template: str, params: dict, ctx: TrialContext) -> str:
+    """A command template with $seed, $trial and $<param> filled in."""
+    values = {k: v for k, v in params.items() if not isinstance(v, (dict, list))}
+    values.update(seed=ctx.seed, trial=ctx.trial)
+    return Template(template).safe_substitute(values)
 
 
 # =============================================================================
@@ -68,29 +78,9 @@ def summarize(samples: list[float], prefix: str) -> dict:
 # =============================================================================
 # nat_verify: RFC 5780 behaviour discovery (also used by `p2prunner verify`)
 # =============================================================================
-# What each NAT type should measure as (RFC 4787 names):
-#   EI = endpoint-independent, AD = address-dependent,
-#   APD = address-and-port-dependent
-EXPECTED = {
-    "full_cone":       ("EI", "EI"),
-    "restricted":      ("EI", "AD"),
-    "port_restricted": ("EI", "APD"),
-    "symmetric":       ("APD", "APD"),
-}
-RANK = {"EI": 0, "AD": 1, "APD": 2}
+# natdiscovery's words for the RFC 4787 behaviours (see nat.py)
 WORDS = {"Endpoint Independent": "EI", "Address Dependent": "AD",
          "Address and Port Dependent": "APD"}
-
-
-def expected_behaviour(cfg, side: str) -> tuple[str, str]:
-    """Expected (mapping, filtering) for one side. Behind CGNAT, the pair of
-    NATs behaves like the stricter of the two, separately for each."""
-    m, f = EXPECTED[cfg.factors[f"nat_{side}"]]
-    if cfg.factors[f"upstream_{side}"] == "cgnat":
-        cm, cf = EXPECTED[cfg.factors[f"cgn_{side}"]]
-        m = max(m, cm, key=RANK.get)
-        f = max(f, cf, key=RANK.get)
-    return m, f
 
 
 def measure_behaviour(tb, side: str, raw: dict) -> tuple[str, str]:
@@ -103,10 +93,22 @@ def measure_behaviour(tb, side: str, raw: dict) -> tuple[str, str]:
             WORDS.get(f.group(1), "?") if f else "none")
 
 
+def measure_all(tb, names: list[str], raw: dict) -> dict[str, tuple[str, str]]:
+    """Every peer's behaviour, measured at once. A peer whose test got no
+    reply at all ("none": a lost packet, likely with many peers testing over
+    lossy links) is tested once more on its own; a wrong answer is not."""
+    measured = tb.parallel({s: (lambda s=s: measure_behaviour(tb, s, raw)) for s in names})
+    for side in [s for s in names if "none" in measured[s]]:
+        raw[f"retried_{side}"] = measured[side]
+        measured[side] = measure_behaviour(tb, side, raw)
+    return measured
+
+
 def nat_verify(tb, cfg, params, ctx) -> dict:
-    measured = tb.parallel({s: (lambda s=s: measure_behaviour(tb, s, ctx.raw)) for s in "ab"})
+    names = [p.name for p in cfg.peers]
+    measured = measure_all(tb, names, ctx.raw)
     metrics, ok = {}, True
-    for side in "ab":
+    for side in names:
         exp_m, exp_f = expected_behaviour(cfg, side)
         got_m, got_f = measured[side]
         metrics.update({
@@ -154,19 +156,19 @@ def ping_once(tb, source: str, plan: PingPlan, raw: dict) -> dict:
 def ping(tb, cfg, params, ctx) -> dict:
     """Measures each side's access path: home NAT (+ CGN) + latency shaping.
 
-    Both peers ping at the same time, so result columns are prefixed with
-    a_ and b_ (e.g. a_rtt_ms_mean). Each home router delays only its own
+    Every peer pings at the same time, so result columns are prefixed with
+    its name (e.g. a_rtt_ms_mean). Each home router delays only its own
     outgoing traffic, so the expected RTT to a WAN host is HALF the
     profile's peer-to-peer RTT (local 5 ms, coast 35 ms, transatlantic 75 ms).
 
     params (all optional):
-      sources    containers to ping from       (default ["peer-a", "peer-b"])
+      sources    containers to ping from       (default every peer)
       target     IP to ping                    (default the STUN server)
       count      number of pings               (default 50)
       interval_s seconds between pings         (default 0.2)
       warmup     first N replies to discard    (default 5; e.g. ARP lookups)
     """
-    sources = params.get("sources", ["peer-a", "peer-b"])
+    sources = params.get("sources", [f"peer-{p.name}" for p in cfg.peers])
     plan = PingPlan.from_params(params)
     results = tb.parallel({src: (lambda src=src: ping_once(tb, src, plan, ctx.raw)) for src in sources})
     metrics = {"target": plan.target, "pings_sent": plan.count, "warmup": plan.warmup}
@@ -207,12 +209,10 @@ def command(tb, cfg, params, ctx) -> dict:
 def command_jobs(tb, params: dict, ctx: TrialContext) -> dict:
     """One job per side that has a command, with placeholders filled in."""
     timeout = float(params.get("timeout_s", 60))
-    values = {k: v for k, v in params.items() if not isinstance(v, (dict, list))}
-    values.update(seed=ctx.seed, trial=ctx.trial)
     jobs = {}
     for side in "ab":
         if template := params.get(f"cmd_{side}"):
-            cmd = Template(template).safe_substitute(values)
+            cmd = fill(template, params, ctx)
             jobs[side] = (lambda side=side, cmd=cmd: tb.sh(f"peer-{side}", cmd, timeout=timeout))
     if not jobs:
         raise ValueError("command trial needs cmd_a and/or cmd_b in [params]")
@@ -243,6 +243,4 @@ def last_json(stdout: str) -> dict | None:
         return None
     return data if isinstance(data, dict) else None
 
-
-TRIALS = {"nat_verify": nat_verify, "ping": ping, "command": command}
 

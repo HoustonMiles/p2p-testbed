@@ -1,5 +1,5 @@
-// rendezvous: introduces the two peers of each session to each other.
-// Runs on the WAN at 203.0.113.101 (see docker-compose.yml).
+// rendezvous: introduces the members of each room to each other.
+// Runs on the WAN at 198.18.0.101 (see p2prunner/topology.py).
 package main
 
 import (

@@ -1,0 +1,34 @@
+# =============================================================================
+# Relay matrix: does the relay connect every NAT pairing?
+#
+# Every home-router pairing, with side B on the public internet and behind
+# CGNAT (the punch_matrix configurations), with both peers going through
+# the TURN relay: Noise handshake through it, then 20 pings. The 8
+# configurations that cannot punch (symmetric against port-restricted or
+# symmetric) should connect here like the rest.
+#
+# A two-peer mesh trial, so the mesh report scores it: usable = 1.00 and
+# as_predicted = 1.00 in every row means the relay connected every pairing.
+#
+#   uv run python -m p2prunner run  experiments/relay_matrix.toml
+#   uv run python -m p2prunner mesh results/relay_matrix/<run>
+# =============================================================================
+
+name = "relay_matrix"
+description = "TURN relay connection for every NAT pairing, with and without CGNAT."
+trial = "mesh"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 60
+est_trial_s = 4
+args = "-relay -direct -pings 20 -ping-interval 50ms -rate-mbit 0"
+
+[matrix]
+nat_a = ["full_cone", "restricted", "port_restricted", "symmetric"]
+nat_b = ["full_cone", "restricted", "port_restricted", "symmetric"]
+upstream_b = ["wan", "cgnat"]
+net_profile = ["coast"]

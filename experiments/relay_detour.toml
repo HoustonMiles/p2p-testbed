@@ -1,0 +1,40 @@
+# =============================================================================
+# Relay detour: what does a relay out of the way cost?
+#
+# relay_path on the coast profile, with the relay delaying everything it
+# sends by relay_delay_ms (RELAY_DELAY_MS): a relayed round trip passes it
+# twice, so it should be 2 x relay_delay_ms longer than the direct path,
+# with the same goodput. 10 ms is a relay in a nearby region, 40 ms one a
+# continent away.
+#
+# These differ from direct_path only in the relay delay, so compare lines
+# each up with direct_path's coast configuration:
+#   uv run python -m p2prunner compare results/direct_path/<run> results/relay_detour/<run> --ignore relay_delay_ms
+#
+#   uv run python -m p2prunner run experiments/relay_detour.toml
+# =============================================================================
+
+name = "relay_detour"
+description = "Relayed RTT and throughput with the relay 0, 10 and 40 ms out of the way, coast profile, 50 Mbit/s links."
+trial = "command"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 90
+est_trial_s = 16
+cmd_a = "punch -name a -room $seed -quiet -relay -direct -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+cmd_b = "punch -name b -room $seed -quiet -relay -direct -pings 50 -ping-interval 100ms -rate-mbit 60 -duration 3s"
+
+[matrix]
+relay_delay_ms = ["0", "10", "40"]
+net_profile = ["coast"]
+uplink_mbit = ["50"]
+downlink_mbit = ["50"]
+
+[[matrix.pairing]]
+name = "realistic"
+nat_a = "port_restricted"
+nat_b = "port_restricted"

@@ -6,15 +6,15 @@
 # (netfilter + conntrack), the same code that runs on most real home routers.
 #
 # The same script is used for two roles:
-#   ROLE=home  - the subscriber's home router (nat-a / nat-b). Sits between a
+#   ROLE=home  - the subscriber's home router (nat-a, nat-b, ...). Sits between a
 #                peer's LAN and either the public WAN or a carrier network.
 #                This is also where the "access link" (latency, jitter, loss,
 #                bandwidth cap) is simulated.
-#   ROLE=cgn   - an ISP's carrier-grade NAT (cgn-a / cgn-b). Sits between the
-#                carrier network (100.64.0.0/10) and the public WAN.
+#   ROLE=cgn   - an ISP's carrier-grade NAT (cgn-a, cgn-b, ...). Sits between the
+#                carrier network (10.201.k.0/24) and the public WAN.
 #
 # Everything is configured through environment variables set in
-# docker-compose.yml (see the README for the full list).
+# the compose file (see p2prunner/compose.py and docs/testbed.md).
 # =============================================================================
 set -euo pipefail
 
@@ -44,7 +44,7 @@ die() { echo "[router:${ROLE:-?}] ERROR: $*" >&2; exit 1; }
 # interface is found by the static IP address compose assigned to it.
 iface_for_ip() {
   ip -o -4 addr show | awk -v want="$1" '{
-    split($4, a, "/")                 # "192.168.10.2/24" -> "192.168.10.2"
+    split($4, a, "/")                 # "10.200.1.2/24" -> "10.200.1.2"
     if (a[1] == want) { sub(/@.*/, "", $2); print $2 }
   }'
 }
@@ -180,7 +180,7 @@ setup_cone_filtering() {
 # attacker only finds ports in use.
 full_cone_filter() {
   ipset create tb_mapped bitmap:port range 0-65535 timeout "$SET_TIMEOUT" -exist \
-    || die "ipset unavailable; run scripts/host_setup.sh on the host"
+    || die "ipset unavailable; run testbed/prepare-host.sh on the host"
   ipset flush tb_mapped
   iptables -t mangle -A TB_MPOST -o "$OUT_IF" -s "$IN_SUBNET" -p udp \
     -j SET --add-set tb_mapped src --exist --timeout "$SET_TIMEOUT"
@@ -194,7 +194,7 @@ full_cone_filter() {
 # of an IP the inside host has contacted FROM PORT P.
 restricted_filter() {
   ipset create tb_contacted hash:ip,port timeout "$SET_TIMEOUT" -exist \
-    || die "ipset unavailable; run scripts/host_setup.sh on the host"
+    || die "ipset unavailable; run testbed/prepare-host.sh on the host"
   ipset flush tb_contacted
   iptables -t mangle -A TB_MPOST -o "$OUT_IF" -s "$IN_SUBNET" -p udp \
     -j SET --add-set tb_contacted dst,src --exist --timeout "$SET_TIMEOUT"
@@ -233,6 +233,10 @@ setup_firewall() {
 # remembering when testing the replay window.
 # ----------------------------------------------------------------------------
 setup_link() {
+  # This peer's own setting, else the testbed-wide one (see compose.py).
+  NET_PROFILE="${NET_PROFILE:-${DEFAULT_NET_PROFILE:-local}}"
+  UPLINK_MBIT="${UPLINK_MBIT:-${DEFAULT_UPLINK_MBIT:-}}"
+  DOWNLINK_MBIT="${DOWNLINK_MBIT:-${DEFAULT_DOWNLINK_MBIT:-}}"
   link_profile
   QUEUE_PKTS="${QUEUE_PKTS:-1000}"   # router buffer size, in packets
   setup_uplink
@@ -262,7 +266,7 @@ setup_uplink() {
   [[ -n "${UPLINK_MBIT:-}" ]] && args+=(rate "${UPLINK_MBIT}mbit")
   (( ${#args[@]} > 0 )) || return 0
   tc qdisc replace dev "$OUT_IF" root netem "${args[@]}" limit "$QUEUE_PKTS" \
-    || die "tc netem failed; run scripts/host_setup.sh on the host (needs sch_netem)"
+    || die "tc netem failed; run testbed/prepare-host.sh on the host (needs sch_netem)"
   log "uplink on $OUT_IF: netem ${args[*]}"
 }
 
@@ -273,14 +277,14 @@ setup_uplink() {
 # device and rate-limited there.
 setup_downlink() {
   ip link add tb_ifb type ifb 2>/dev/null || ip link show tb_ifb >/dev/null 2>&1 \
-    || die "cannot create IFB device; run scripts/host_setup.sh on the host (needs ifb)"
+    || die "cannot create IFB device; run testbed/prepare-host.sh on the host (needs ifb)"
   ip link set dev tb_ifb up
   tc qdisc del dev "$OUT_IF" ingress 2>/dev/null || true
   tc qdisc add dev "$OUT_IF" handle ffff: ingress
   tc filter add dev "$OUT_IF" parent ffff: protocol all prio 1 u32 match u32 0 0 \
     action mirred egress redirect dev tb_ifb
   tc qdisc replace dev tb_ifb root netem rate "${DOWNLINK_MBIT}mbit" limit "$QUEUE_PKTS" \
-    || die "tc netem failed; run scripts/host_setup.sh on the host (needs sch_netem)"
+    || die "tc netem failed; run testbed/prepare-host.sh on the host (needs sch_netem)"
   log "downlink on $OUT_IF: capped at ${DOWNLINK_MBIT} Mbit/s (via tb_ifb)"
 }
 

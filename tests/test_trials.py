@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from p2prunner import trials
+from p2prunner import nat, trials
 from p2prunner.experiment import expand_matrix
 from p2prunner.trials import TrialContext
 from tests.fakes import Done
@@ -21,8 +21,8 @@ class StatsTest(unittest.TestCase):
 class ExpectedBehaviourTest(unittest.TestCase):
     def test_cgnat_takes_the_stricter_of_both(self):
         (cfg,) = expand_matrix({"nat_b": ["full_cone"], "upstream_b": ["cgnat"], "cgn_b": ["restricted"]})
-        self.assertEqual(trials.expected_behaviour(cfg, "b"), ("EI", "AD"))
-        self.assertEqual(trials.expected_behaviour(cfg, "a"), ("EI", "APD"))
+        self.assertEqual(nat.expected_behaviour(cfg, "b"), ("EI", "AD"))
+        self.assertEqual(nat.expected_behaviour(cfg, "a"), ("EI", "APD"))
 
 
 class PingTrialTest(unittest.TestCase):
@@ -67,7 +67,7 @@ class CommandTrialTest(unittest.TestCase):
 
         (cfg,) = expand_matrix({"net_profile": ["local"]})
         ctx = TrialContext(trial=0, seed=42)
-        params = {"cmd_a": "punch -session $seed", "cmd_b": "punch -session $seed"}
+        params = {"cmd_a": "punch -room $seed", "cmd_b": "punch -room $seed"}
         return trials.command(Peers(), cfg, params, ctx), ctx
 
     def test_columns_get_side_prefixes(self):

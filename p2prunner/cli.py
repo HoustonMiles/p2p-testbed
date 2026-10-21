@@ -14,8 +14,15 @@ Command line for the experiment runner.
   uv run python -m p2prunner verify [--all]
       Check the running testbed (see p2prunner/checks.py).
 
+  uv run python -m p2prunner up --peers 4 [--cgn b,d]
+  uv run python -m p2prunner down
+  uv run python -m p2prunner compose --peers 4 [--cgn b,d]
+      Start a testbed of N peers by hand (settings from your shell or .env,
+      e.g. NAT_C_TYPE=symmetric), stop it, or print its compose file.
+
   uv run python -m p2prunner hops RUN [RERUN ...]
   uv run python -m p2prunner compare BASE NEW [NEW_RERUN ...]
+  uv run python -m p2prunner mesh RUN [RERUN ...]
       Reports on finished runs (see p2prunner/reports.py).
 
 Trial order: each configuration's trials are split into blocks (block_size
@@ -39,12 +46,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from p2prunner import checks, reports
+from p2prunner import compose as compose_file
 from p2prunner import experiment as experiment_mod
+from p2prunner.mesh import mesh
 from p2prunner.store import ResultStore
 from p2prunner.testbed import Testbed, TestbedError
-from p2prunner.trials import TRIALS, TrialContext, nat_verify
+from p2prunner.trials import TrialContext, command, nat_verify, ping
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Trial types by name (see trials.py and mesh.py).
+TRIALS = {"nat_verify": nat_verify, "ping": ping, "command": command, "mesh": mesh}
 
 # Rough seconds per trial, for `plan` estimates only.
 EST_TRIAL_S = {"nat_verify": 12, "ping": None, "command": None}
@@ -157,6 +169,7 @@ def resume_run(args):
     exp = experiment_mod.load(store.dir / "experiment.toml")
     exp.runs = json.loads((store.dir / "meta.json").read_text())["runs"]
     done = store.done()
+    store.drop_unfinished_links(done)
     print(f"Resuming {store.dir} ({len(done)} trials already done)")
     return exp, store, done
 
@@ -234,6 +247,9 @@ def finish(run: Run) -> None:
     print(f"\nDone in {fmt_duration(time.monotonic() - run.started)}. Results: {run.store.dir}\n"
           f"  {run.store.trials_path.name}  (pandas: pd.read_json(path, lines=True))\n"
           f"  {csv_path.name}")
+    if run.current is not None:
+        print(f"\nThe testbed is still running {run.exp.configs[run.current].label}.\n"
+              "  uv run python -m p2prunner down    returns to the committed two-peer stack")
 
 
 def base_row(exp, cfg, trial: int) -> dict:
@@ -255,7 +271,7 @@ def start_config(run: Run, cfg) -> bool:
 
 def bring_up(run: Run, cfg, event: dict) -> bool:
     try:
-        run.tb.up(cfg.env)
+        run.tb.up(cfg)
     except TestbedError as e:
         run.store.add_config_event({**event, "started": False, "error": str(e)[-500:]})
         print(f"    could not start: {str(e).strip().splitlines()[-1]}")
@@ -279,7 +295,7 @@ def run_trial(run: Run, cfg, trial: int) -> dict:
     t0 = time.monotonic()
     try:
         run.tb.reset_state()
-        row.update(run.trial_fn(run.tb, cfg, run.exp.params, ctx))
+        row.update(run.trial_fn(run.tb, cfg, {**run.exp.params, **cfg.params}, ctx))
         row.setdefault("ok", True)
     except TestbedError as e:
         row.update(ok=False, error=str(e)[-300:], testbed_error=True)
@@ -287,6 +303,8 @@ def run_trial(run: Run, cfg, trial: int) -> dict:
         row.update(ok=False, error=f"{type(e).__name__}: {e}"[-300:])
         ctx.raw["traceback"] = traceback.format_exc()
     row["duration_s"] = round(time.monotonic() - t0, 3)
+    keys = {k: row[k] for k in ("config_id", "trial", "seed")}
+    run.store.add_links([{**keys, **link} for link in ctx.links])
     run.store.add_trial(row)
     run.store.save_raw(cfg.id, trial, ctx.raw)
     return row
@@ -323,19 +341,65 @@ def cmd_verify(args) -> int:
     return checks.verify(tb, every_type=args.all)
 
 
+def cmd_compose(args) -> int:
+    print(compose_file.render(args.peers, cgn_names(args.cgn)), end="")
+    return 0
+
+
+def cmd_up(args) -> int:
+    tb = Testbed(REPO_ROOT)
+    try:
+        tb.use_stack(args.peers, cgn_names(args.cgn))
+    except TestbedError as e:
+        print(e)
+        return 1
+    result = tb.compose("up", "-d", "--wait", "--remove-orphans", timeout=120 + 5 * args.peers)
+    print(result.stderr[-2000:] if result.returncode else f"Started {args.peers} peers ({tb.compose_path}).")
+    return result.returncode
+
+
+def cmd_down(args) -> int:
+    Testbed(REPO_ROOT).down()
+    print("Stopped. The committed two-peer docker-compose.yml is in use again.")
+    return 0
+
+
+def cgn_names(text: str) -> set[str]:
+    return {name.strip() for name in text.split(",") if name.strip()}
+
+
 def cmd_hops(args) -> int:
     return reports.hops(args.runs)
 
 
 def cmd_compare(args) -> int:
-    return reports.compare(args.base, args.new)
+    return reports.compare(args.base, args.new, tuple(args.ignore))
+
+
+def cmd_mesh(args) -> int:
+    return reports.mesh(args.runs)
 
 
 # =============================================================================
 def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except (ValueError, FileNotFoundError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="p2prunner", description="P2P testbed experiment runner")
     sub = parser.add_subparsers(dest="command", required=True)
+    add_experiment_commands(sub)
+    add_testbed_commands(sub)
+    add_report_commands(sub)
+    return parser
 
+
+def add_experiment_commands(sub) -> None:
     p = sub.add_parser("plan", help="show configurations and a time estimate")
     p.add_argument("experiment", help="experiment file (.toml)")
     p.add_argument("--runs", type=int, help="override runs per configuration")
@@ -348,6 +412,8 @@ def main(argv=None) -> int:
     r.add_argument("--results", default="results", help="results folder (default: results/)")
     r.set_defaults(func=cmd_run)
 
+
+def add_testbed_commands(sub) -> None:
     s = sub.add_parser("smoke", help="check the running testbed's wiring (seconds)")
     s.set_defaults(func=cmd_smoke)
 
@@ -356,6 +422,18 @@ def main(argv=None) -> int:
                    help="cycle through every NAT type (as home router and as CGN), then restore")
     v.set_defaults(func=cmd_verify)
 
+    for name, func, help_text in (("compose", cmd_compose, "print the compose file for N peers"),
+                                  ("up", cmd_up, "start a testbed of N peers by hand")):
+        u = sub.add_parser(name, help=help_text)
+        u.add_argument("--peers", type=int, default=2, help="how many peers (default 2)")
+        u.add_argument("--cgn", default="", metavar="NAMES",
+                       help="peers that get a CGN to sit behind, e.g. b,d (then NAT_B_UPSTREAM=cgnat)")
+        u.set_defaults(func=func)
+    d = sub.add_parser("down", help="stop the testbed and go back to the committed two-peer stack")
+    d.set_defaults(func=cmd_down)
+
+
+def add_report_commands(sub) -> None:
     h = sub.add_parser("hops", help="Experiment A: hop success per NAT pairing")
     h.add_argument("runs", nargs="+", metavar="RUN",
                    help="results folder; later folders replace the configurations they rerun")
@@ -364,12 +442,12 @@ def main(argv=None) -> int:
     c = sub.add_parser("compare", help="two runs of the same configurations side by side")
     c.add_argument("base", metavar="BASE", help="results folder of the baseline, e.g. punch_path")
     c.add_argument("new", nargs="+", metavar="NEW", help="results folder(s) to compare against it")
+    c.add_argument("--ignore", action="append", default=[], metavar="SETTING",
+                   help="match configurations that differ only in this setting, e.g. relay_delay_ms (repeatable)")
     c.set_defaults(func=cmd_compare)
 
-    args = parser.parse_args(argv)
-    try:
-        return args.func(args)
-    except (ValueError, FileNotFoundError) as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 2
+    m = sub.add_parser("mesh", help="mesh trials: how much of each mesh came up, as predicted, how fast")
+    m.add_argument("runs", nargs="+", metavar="RUN",
+                   help="results folder; later folders replace the configurations they rerun")
+    m.set_defaults(func=cmd_mesh)
 

@@ -3,16 +3,21 @@ package direct
 import (
 	"errors"
 	"net/netip"
+	"p2ptestbed/p2p/internal/noise"
 	"time"
 )
 
 // Config for a Hopper. Zero durations take the defaults noted.
 type Config struct {
-	Session  *Session
+	Session  *noise.Session
 	Schedule *Schedule // built from Session.HopKey(); the same on both peers
-	Role     byte      // 'a' or 'b'; the peer is the other
 	PeerIP   netip.Addr
-	LocalIP  netip.Addr // zero binds all interfaces
+
+	// Ports is shared by all the hoppers of one peer (one per link). Nil
+	// gives this hopper sockets of its own, bound to LocalIP (zero: all
+	// interfaces).
+	Ports   *Ports
+	LocalIP netip.Addr
 
 	Lead time.Duration // open the next slot's port this early; default Interval/10
 
@@ -28,9 +33,9 @@ type Config struct {
 	KeepAlive     time.Duration // default 10 s, under the NAT's 30 s UDP timeout
 	Tick          time.Duration // housekeeping period; default 5 ms
 
-	// OnPacket gets every authenticated Data packet, on the reader goroutine
-	// of its socket: it must be safe for concurrent use and fast. Payload is
-	// only valid during the call.
+	// OnPacket gets every authenticated Data packet, on the Ports reader of
+	// its socket, which other links' packets share: it must be safe for
+	// concurrent use and fast. Payload is only valid during the call.
 	OnPacket func(Inbound)
 
 	Logf func(format string, args ...any)
@@ -59,8 +64,6 @@ func (c Config) validate() error {
 	switch {
 	case c.Session == nil || c.Schedule == nil:
 		return errors.New("direct: Session and Schedule are required")
-	case c.Role != 'a' && c.Role != 'b':
-		return errors.New("direct: role must be a or b")
 	case !c.PeerIP.IsValid():
 		return errors.New("direct: PeerIP is required")
 	}
@@ -80,4 +83,3 @@ func (c Config) validateTiming() error {
 	}
 	return nil
 }
-

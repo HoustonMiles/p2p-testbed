@@ -1,15 +1,21 @@
-// punch runs one side of a peer-to-peer trial on peer-a or peer-b: raw UDP
-// by default, the Port-Hopping Direct Channel with -direct.
+// punch runs one peer of a peer-to-peer trial: raw UDP by default, the
+// Port-Hopping Direct Channel with -direct, through the TURN relay instead
+// of a hole punch with -relay (with -direct too: Noise through the relay,
+// without hopping). Peers meet in a room at the rendezvous and link with
+// every other member (a full mesh).
 //
-//	punch -role a -session 42      # on peer-a
-//	punch -role b -session 42      # on peer-b, at the same time
-//	punch -role a -session 42 -direct -hop-interval 1s
+//	punch -name a -room 42         # on peer-a
+//	punch -name b -room 42         # on peer-b, at the same time
+//	punch -name a -room 42 -direct -hop-interval 1s
+//	punch -name a -room 42 -relay -direct   # the relayed baseline
+//	punch -name a -room 42 -peers 3   # a room of three: links to both others
 //	punch -genkey /keys/a          # write /keys/a.key and /keys/a.pub, then exit
 //
-// Progress goes to stderr; the last line of stdout is one JSON object with
-// every measurement, as the runner's "command" trial type expects. Exit
-// status 0 means the run completed (a failed punch or hop is a result),
-// 1 that the run itself broke, 2 a usage error.
+// Progress goes to stderr; stdout gets one JSON object per link with every
+// measurement, so with two peers the last (only) line is what the runner's
+// "command" trial type expects. Exit status 0 means the run completed (a
+// failed punch or hop is a result), 1 that the run or a link broke, 2 a
+// usage error.
 package main
 
 import (
@@ -19,18 +25,20 @@ import (
 	"os"
 	"time"
 
-	"p2ptestbed/p2p/internal/direct"
+	"p2ptestbed/p2p/internal/identity"
 	"p2ptestbed/p2p/internal/peer"
 )
 
 func main() {
 	var c peer.Config
 	var d peer.DirectConfig
-	role := flag.String("role", "", "this peer's role: a or b (required)")
+	flag.StringVar(&c.Name, "name", "", "this peer's name, for logs, results and the default key file (required)")
 	connectFlags(&c)
 	measureFlags(&c)
 	useDirect := flag.Bool("direct", false, "run the Port-Hopping Direct Channel instead of raw UDP")
 	directFlags(&d)
+	var rc peer.RelayConfig
+	useRelay := relayFlags(&rc)
 	keys := keyFlags()
 	genkey := flag.String("genkey", "", "write a new static keypair to `BASE`.key and BASE.pub, then exit")
 	quiet := flag.Bool("quiet", false, "no progress output on stderr")
@@ -39,15 +47,17 @@ func main() {
 	if *genkey != "" {
 		os.Exit(writeKeypair(*genkey))
 	}
-	if len(*role) != 1 || !flagSet("session") {
-		usage("usage: punch -role a|b -session N [flags]")
+	if c.Name == "" || !flagSet("room") {
+		usage("usage: punch -name NAME -room N [flags]")
 	}
-	c.Role = (*role)[0]
 	if *useDirect {
-		if err := keys.load(&d, c.Role); err != nil {
+		if err := keys.load(&d, c.Name); err != nil {
 			usage(err.Error())
 		}
 		c.Direct = &d
+	}
+	if *useRelay {
+		c.Relay = &rc
 	}
 	if !*quiet {
 		c.Logf = func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
@@ -56,29 +66,45 @@ func main() {
 }
 
 func run(c peer.Config) int {
-	res, err := peer.Run(c)
-	out, _ := json.Marshal(res)
-	fmt.Println(string(out))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		return 1
+	rows, err := peer.Run(c)
+	status := 0
+	for _, row := range rows {
+		out, _ := json.Marshal(row)
+		fmt.Println(string(out))
+		if row.Error != "" {
+			fmt.Fprintf(os.Stderr, "error (link %s): %s\n", row.PeerID, row.Error)
+			status = 1
+		}
 	}
-	return 0
+	if err != nil {
+		status = 1
+	}
+	return status
 }
 
 // TODO(paper §5 Simulation Environment): these addresses mirror
-// docker-compose.yml; read them from the environment so they are defined once.
+// p2prunner/topology.py; pass them in from the compose file's environment
+// so they are defined once.
 func connectFlags(c *peer.Config) {
-	flag.Uint64Var(&c.Session, "session", 0, "session ID shared by both peers, e.g. the trial seed (required)")
+	flag.Uint64Var(&c.Room, "room", 0, "rendezvous room shared by the peers that should meet, e.g. the trial seed (required)")
+	flag.IntVar(&c.Peers, "peers", 2, "members of the room, this peer included; links are made with all the others")
 	flag.StringVar(&c.Local, "local", ":0", "local UDP address to bind")
-	flag.StringVar(&c.STUN, "stun", "203.0.113.100:3478", `STUN server ("" to skip)`)
-	flag.StringVar(&c.Rendezvous, "rendezvous", "203.0.113.101:7000", "rendezvous server")
+	flag.StringVar(&c.STUN, "stun", "198.18.0.100:3478", `STUN server ("" to skip)`)
+	flag.StringVar(&c.Rendezvous, "rendezvous", "198.18.0.101:7000", "rendezvous server")
 	flag.DurationVar(&c.STUNTimeout, "stun-timeout", 2*time.Second, "give up on STUN after this long")
-	flag.DurationVar(&c.RendezvousTimeout, "rendezvous-timeout", 15*time.Second, "wait this long for the other peer to register")
+	flag.DurationVar(&c.RendezvousTimeout, "rendezvous-timeout", 15*time.Second, "wait this long for the other members of the room")
 	flag.DurationVar(&c.PunchTimeout, "punch-timeout", 10*time.Second, "give up hole punching after this long")
 	flag.DurationVar(&c.PunchInterval, "punch-interval", 50*time.Millisecond, "time between punch packets")
-	flag.DurationVar(&c.StepTimeout, "step-timeout", 10*time.Second, "wait this long for the other peer between steps")
+	flag.DurationVar(&c.StepTimeout, "step-timeout", 10*time.Second, "wait this long for a member at each step of a link")
 	flag.DurationVar(&c.Linger, "linger", 500*time.Millisecond, "keep answering the peer this long before exiting")
+}
+
+func relayFlags(rc *peer.RelayConfig) *bool {
+	use := flag.Bool("relay", false, "relayed mode: every link goes through the TURN relay instead of a hole punch")
+	flag.StringVar(&rc.Server, "relay-server", "198.18.0.102:3478", "relay: the TURN server")
+	flag.StringVar(&rc.Username, "relay-user", "testbed", "relay: TURN username")
+	flag.StringVar(&rc.Password, "relay-pass", "testbed", "relay: TURN password")
+	return use
 }
 
 func measureFlags(c *peer.Config) {
@@ -120,26 +146,25 @@ type keySettings struct{ key, peerKey *string }
 
 func keyFlags() keySettings {
 	return keySettings{
-		key:     flag.String("key", "", "direct: this peer's static key file (default /keys/<role>.key)"),
-		peerKey: flag.String("peer-key", "", `direct: the peer's public key file (default /keys/<other role>.pub), or "rendezvous" to take the key the rendezvous announces, or "none" to trust it on first use (xx, ik responder)`),
+		key:     flag.String("key", "", "direct: this peer's static key file (default /keys/<name>.key)"),
+		peerKey: flag.String("peer-key", "/keys", `direct: the trusted peers' public keys: a .pub file or a directory of them; or "rendezvous" to take the key the rendezvous announces, or "none" to trust it on first use (xx, ik responder)`),
 	}
 }
 
 // load reads the key files into d. Make them with -genkey.
-func (k keySettings) load(d *peer.DirectConfig, role byte) error {
-	other := 'a' + 'b' - role
-	keyPath := orDefault(*k.key, fmt.Sprintf("/keys/%c.key", role))
-	kp, err := direct.ReadKeypair(keyPath)
+func (k keySettings) load(d *peer.DirectConfig, name string) error {
+	keyPath := orDefault(*k.key, fmt.Sprintf("/keys/%s.key", name))
+	kp, err := identity.ReadKeypair(keyPath)
 	if err != nil {
-		return fmt.Errorf("-key: %v (make one with: punch -genkey /keys/%c)", err, role)
+		return fmt.Errorf("-key: %v (make one with: punch -genkey /keys/%s)", err, name)
 	}
 	d.Key = kp
-	switch from := orDefault(*k.peerKey, fmt.Sprintf("/keys/%c.pub", other)); from {
+	switch from := *k.peerKey; from {
 	case "rendezvous", "none":
 		d.PeerKeyFrom = from
 	default:
 		d.PeerKeyFrom = "file"
-		if d.PeerKey, err = direct.ReadPublicKey(from); err != nil {
+		if d.TrustedKeys, err = identity.ReadTrustedKeys(from, kp.Public); err != nil {
 			return fmt.Errorf("-peer-key: %v", err)
 		}
 	}
@@ -154,9 +179,9 @@ func orDefault(v, def string) string {
 }
 
 func writeKeypair(base string) int {
-	kp, err := direct.NewKeypair()
+	kp, err := identity.NewKeypair()
 	if err == nil {
-		err = direct.WriteKeypair(base, kp)
+		err = identity.WriteKeypair(base, kp)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "genkey:", err)
