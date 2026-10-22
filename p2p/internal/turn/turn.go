@@ -6,7 +6,10 @@
 //
 // A request is answered 401 until it carries the server's realm and nonce;
 // Read learns them and says to send the request again (Response.Retry),
-// as it does when the nonce goes stale (438).
+// as it does when the nonce goes stale (438). A 401 to a signed request
+// means the credentials are wrong; a 401 to an unsigned one, even one that
+// arrives after we learned the key (a resent request's late reply), never
+// does.
 package turn
 
 import (
@@ -57,7 +60,8 @@ type Client struct {
 	Username, Password string
 
 	realm, nonce []byte
-	key          []byte // MD5(username:realm:password), once the realm is known
+	key          []byte                 // MD5(username:realm:password), once the realm is known
+	unsigned     map[stun.TxID]struct{} // requests sent before we had the key, until answered
 }
 
 // Response is what Read made of a reply to one of our requests.
@@ -103,6 +107,10 @@ func (c *Client) Refresh(id stun.TxID, lifetime time.Duration) []byte {
 func (c *Client) request(method uint16, id stun.TxID, attrs ...stun.Attr) []byte {
 	m := stun.Message{Type: messageType(method, classRequest), ID: id, Attrs: attrs}
 	if c.key == nil {
+		if c.unsigned == nil {
+			c.unsigned = map[stun.TxID]struct{}{}
+		}
+		c.unsigned[id] = struct{}{}
 		return m.Encode()
 	}
 	m.Attrs = append(m.Attrs,
@@ -121,6 +129,8 @@ func (c *Client) Read(b []byte) (r Response, ok bool) {
 		return r, false
 	}
 	r.Method, r.ID = methodOf(m.Type), m.ID
+	_, unsigned := c.unsigned[m.ID]
+	delete(c.unsigned, m.ID)
 	switch m.Type & classError {
 	case classSuccess:
 		if c.key != nil && !stun.CheckIntegrity(b, c.key) {
@@ -129,7 +139,7 @@ func (c *Client) Read(b []byte) (r Response, ok bool) {
 		r.OK = true
 		readSuccess(m, &r)
 	case classError:
-		c.readError(m, &r)
+		c.readError(m, &r, unsigned)
 	default:
 		return r, false
 	}
@@ -148,16 +158,17 @@ func readSuccess(m stun.Message, r *Response) {
 	}
 }
 
-// readError reads the error code. 401 before we had a key, or 438 (stale
-// nonce), carries the realm and nonce to use: learn them and retry. A 401
-// with a key means the credentials are wrong; retrying would only loop.
-func (c *Client) readError(m stun.Message, r *Response) {
+// readError reads the error code. 401 to an unsigned request, or 438
+// (stale nonce), carries the realm and nonce to use: learn them and retry.
+// A 401 to a signed request means the credentials are wrong; retrying
+// would only loop.
+func (c *Client) readError(m stun.Message, r *Response, unsigned bool) {
 	if v, ok := m.Get(attrErrorCode); ok && len(v) >= 4 {
 		r.Code, r.Reason = int(v[2]&0x07)*100+int(v[3]), string(v[4:])
 	}
 	realm, hasRealm := m.Get(attrRealm)
 	nonce, hasNonce := m.Get(attrNonce)
-	if !hasNonce || (r.Code != 401 && r.Code != 438) || (r.Code == 401 && c.key != nil) {
+	if !hasNonce || (r.Code != 401 && r.Code != 438) || (r.Code == 401 && !unsigned) {
 		return
 	}
 	if hasRealm {

@@ -36,13 +36,14 @@ func (r *runner) onSTUN(m inbound) {
 }
 
 // rendezvousClient joins our room with our static key in direct mode, so
-// the rendezvous can pass it to the other members.
+// the rendezvous can pass it to the other members. In handoff mode the
+// others may learn our own address as well as our relayed one.
 func (r *runner) rendezvousClient() (*rendezvous.Client, error) {
 	server, err := resolve(r.cfg.Rendezvous)
 	if err != nil {
 		return nil, fmt.Errorf("rendezvous address: %w", err)
 	}
-	c := &rendezvous.Client{Server: server, Room: r.cfg.Room, ID: r.id}
+	c := &rendezvous.Client{Server: server, Room: r.cfg.Room, ID: r.id, Handoff: r.cfg.Handoff}
 	if r.cfg.Direct != nil {
 		c.Key = r.cfg.Direct.Key.Public
 	}

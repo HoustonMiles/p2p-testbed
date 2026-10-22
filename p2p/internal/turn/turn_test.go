@@ -73,6 +73,22 @@ func TestRejectsForgedAndWrongCredentials(t *testing.T) {
 	}
 }
 
+// Allocate resent before the first 401 arrived: the second 401 comes after
+// we learned the key, but answers an unsigned request, so it is not a
+// verdict on our credentials.
+func TestLate401ToAResentRequestRetries(t *testing.T) {
+	s := server{realm: "p2p-testbed", nonce: "n1", password: "testbed"}
+	c := &Client{Username: "testbed", Password: "testbed"}
+	first, second := c.Allocate(stun.NewTxID()), c.Allocate(stun.NewTxID())
+	c.Read(s.fail(first, 401))
+	if r, ok := c.Read(s.fail(second, 401)); !ok || !r.Retry {
+		t.Fatalf("late 401: %+v %v, want a retry", r, ok)
+	}
+	if r, _ := c.Read(s.fail(c.Allocate(stun.NewTxID()), 401)); r.Retry {
+		t.Fatal("a 401 to a signed request retried")
+	}
+}
+
 func TestStaleNonceRetriesWithTheNewOne(t *testing.T) {
 	s := server{realm: "p2p-testbed", nonce: "n1", password: "testbed"}
 	c := &Client{Username: "testbed", Password: "testbed"}

@@ -1,0 +1,38 @@
+# =============================================================================
+# Handoff matrix: does every NAT pairing connect, on the right path?
+#
+# The punch_matrix and relay_matrix configurations (every home-router
+# pairing, side B on the public internet and behind CGNAT) in handoff mode:
+# each pair binds its relay channel, punches, runs the Noise handshake
+# through the relay, then hops if both sides punched and both NATs keep
+# ports, and stays on the relay otherwise. Then 20 pings on that path.
+#
+# Expected (Experiment A and RFC 4787, see p2prunner/nat.py): all 32
+# configurations connect; the 18 where no NAT is symmetric hop, the other
+# 14 go through the relay (8 because the punch fails, 6 because a
+# symmetric NAT changes ports). In the mesh report: usable = 1.00 and
+# as_predicted = 1.00 in every row; links.jsonl has each end's path and
+# handoff_reason.
+#
+#   uv run python -m p2prunner run  experiments/handoff_matrix.toml
+#   uv run python -m p2prunner mesh results/handoff_matrix/<run>
+# =============================================================================
+
+name = "handoff_matrix"
+description = "Handoff mode for every NAT pairing, with and without CGNAT: hop where possible, else the relay."
+trial = "mesh"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 60
+est_trial_s = 8           # pairs that cannot punch wait out -punch-timeout first
+args = "-handoff -direct -hop-interval 1s -punch-timeout 5s -pings 20 -ping-interval 50ms -rate-mbit 0"
+
+[matrix]
+nat_a = ["full_cone", "restricted", "port_restricted", "symmetric"]
+nat_b = ["full_cone", "restricted", "port_restricted", "symmetric"]
+upstream_b = ["wan", "cgnat"]
+net_profile = ["coast"]

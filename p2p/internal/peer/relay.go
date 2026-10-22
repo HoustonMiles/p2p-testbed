@@ -19,7 +19,9 @@ import (
 // address. The member sends to our relayed address, so neither side ever
 // sends to the other's own address. With Config.Direct set, the link runs
 // the Noise handshake through the relay and seals everything after it, so
-// the relay forwards only ciphertext; it does not hop.
+// the relay forwards only ciphertext; it does not hop. Handoff mode
+// (handoff.go) uses the same allocation and channels for the links that
+// cannot hop.
 //
 // TODO(paper §5 Relayed Mode, long sessions): allocations last 10 minutes,
 // permissions 5; refresh both for sessions longer than that (the attack
@@ -103,10 +105,13 @@ func (r *runner) allocate() error {
 	return nil
 }
 
-// onRelayReply takes the replies to the runner's own requests.
+// onRelayReply takes the replies to the runner's own requests. Allocate is
+// resent until answered, so replies can come after the allocation; those
+// (a refusal of the duplicate among them) change nothing.
 func (r *runner) onRelayReply(resp turn.Response) {
 	rl := r.relay
 	switch {
+	case rl.addr.IsValid():
 	case resp.OK && resp.Relayed.IsValid():
 		rl.addr = resp.Relayed
 	case resp.Retry: // the server gave us its realm and nonce: ask again, signed
@@ -165,7 +170,7 @@ func (l *link) fromRelay(at time.Duration, data []byte) {
 // counterpart of the punch.
 func (l *link) bindRelay() bool {
 	if !l.peerRelay.IsValid() {
-		l.fail(errors.New("relay: the member announced no relayed address (is it in relayed mode?)"))
+		l.fail(errors.New("relay: the member announced no relayed address (is it in relayed or handoff mode?)"))
 		return false
 	}
 	l.channel = l.r.relay.bind(l)

@@ -9,10 +9,8 @@ import (
 
 // startDirect brings up the direct channel on the link: Noise handshake,
 // port check, hopper, then a first hop proven both ways. A link that cannot
-// hop ends there with that result.
-//
-// TODO(paper §5 Dynamic Handoff Mode): a link stopped here is where the
-// Handoff Manager should pivot it to the relay instead.
+// hop ends there with that result; in handoff mode it would go through the
+// relay instead (handoff.go).
 func (l *link) startDirect() bool {
 	if !l.handshake() || !l.checkPorts() {
 		return false
@@ -21,38 +19,59 @@ func (l *link) startDirect() bool {
 		l.fail(err)
 		return false
 	}
-	w := barrierWait{step: stepHopping, timeout: l.r.cfg.StepTimeout, bothWays: true}
-	if !l.meet(w) {
-		l.stop("hop: no contact through the hopper: " + w.errFor(l).Error())
+	if err := l.firstHop(); err != nil {
+		l.stop("hop: no contact through the hopper: " + err.Error())
 		return false
 	}
-	l.res.HopConnected = true
 	return true
+}
+
+// firstHop waits until a hop has worked both ways.
+func (l *link) firstHop() error {
+	w := barrierWait{step: stepHopping, timeout: l.r.cfg.StepTimeout, bothWays: true}
+	if !l.meet(w) {
+		return w.errFor(l)
+	}
+	l.res.HopConnected = true
+	return nil
 }
 
 // checkPorts exchanges, at a barrier, whether each side's NAT keeps the
 // local port as the public port, which hopping needs on both sides.
 func (l *link) checkPorts() bool {
-	keeps := *l.r.res.KeepsPort
-	var changes uint64 // barrier value: 1 = our NAT changes ports
-	if !keeps {
-		changes = 1
-	}
-	if !l.barrier(barrierWait{step: stepSecured, value: changes, timeout: l.r.cfg.StepTimeout}) {
+	if !l.barrier(barrierWait{step: stepSecured, value: l.r.changesPorts(), timeout: l.r.cfg.StepTimeout}) {
 		return false
 	}
-	peerKeeps := l.peerValue[stepSecured] == 0
-	l.res.PeerKeepsPort, l.res.HopPossible = ptr(peerKeeps), ptr(keeps && peerKeeps)
-	if !(keeps && peerKeeps) && !l.r.cfg.Direct.HopForce {
-		l.stop("hop: not possible (a NAT changes ports); the relay would take over")
+	if !l.notePorts() && !l.r.cfg.Direct.HopForce {
+		l.stop("hop: not possible (a NAT changes ports); handoff mode would use the relay")
 		return false
 	}
 	return true
 }
 
+// notePorts reads whether the member's NAT keeps ports off its Secured
+// barrier, and reports whether both do, so hopping is possible.
+func (l *link) notePorts() bool {
+	peerKeeps := l.peerValue[stepSecured] == 0
+	possible := *l.r.res.KeepsPort && peerKeeps
+	l.res.PeerKeepsPort, l.res.HopPossible = ptr(peerKeeps), ptr(possible)
+	return possible
+}
+
+// changesPorts is our Secured barrier's value: 1 if our NAT changes ports.
+func (r *runner) changesPorts() uint64 {
+	if *r.res.KeepsPort {
+		return 0
+	}
+	return 1
+}
+
 // keepsPort: STUN saw our local port, and the rendezvous saw the same
 // mapping. Without STUN we cannot tell, and assume it does.
 func (r *runner) keepsPort() bool {
+	if r.cfg.changesPorts {
+		return false
+	}
 	if !r.stunGot.IsValid() {
 		return true
 	}

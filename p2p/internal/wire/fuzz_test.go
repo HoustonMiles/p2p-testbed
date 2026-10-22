@@ -32,6 +32,8 @@ func FuzzParseIntro(f *testing.F) {
 	f.Add(in.Append(nil))
 	in.Relay = netip.MustParseAddrPort("198.18.0.102:50001")
 	f.Add(in.Append(nil))
+	in.Handoff = true
+	f.Add(in.Append(nil))
 	f.Add([]byte{1, 2, 3})
 	f.Fuzz(func(t *testing.T, b []byte) {
 		got, ok := ParseIntro(b)

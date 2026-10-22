@@ -14,9 +14,10 @@ p2p/
     peer/             one peer's run, with one link per member: peer.go (the steps),
                       socket.go (the one socket, dispatch to links), meet.go (STUN, rendezvous),
                       link.go (one link: its goroutine and state), punch.go, relay.go
-                      (relayed mode), handshake.go, hop.go, barrier.go, measure.go,
-                      result.go; loopback_test.go, mesh_test.go and relay_test.go (with a
-                      fake TURN relay) run whole trials
+                      (relayed mode), handoff.go (handoff mode), handshake.go, hop.go,
+                      barrier.go, measure.go, result.go; loopback_test.go, mesh_test.go,
+                      relay_test.go (with a fake TURN relay) and handoff_test.go run
+                      whole trials
     rendezvous/       rooms: server.go, and client.go (a member's side)
     stun/             STUN messages, with MESSAGE-INTEGRITY (the format TURN builds on)
     turn/             the TURN client: allocation with long-term credentials, permissions,
@@ -172,6 +173,41 @@ the same steps and columns, so raw, direct and relayed runs line up.
   fails the link at once.
 - At the end the peer releases its allocation.
 
+## Handoff mode (Handoff Manager, step 6a)
+
+`punch -handoff -direct` keeps every link connected: each link hops where
+hopping holds and goes through the relay where it does not. Plain `-direct`
+(hop or nothing) and `-relay` (relay only) are unchanged, so all three
+modes can be compared on the same configurations.
+
+- The peer allocates a relayed address, as in relayed mode, and registers
+  it with a handoff flag: the rendezvous then introduces it by its own
+  address and its relayed address, since its members punch it too.
+- Each link binds its relay channel first. The relay then carries the
+  link's setup, so the two sides can always reach each other while they
+  decide.
+- The link punches the member's own address. A failed punch is not the
+  end of the link.
+- The connected barrier (through the relay) carries whether each side
+  punched. The Noise handshake runs through the relay, and the secured
+  barrier after it carries whether each side's NAT keeps ports.
+- Both sides then decide from the same values, so they pick the same path:
+
+  | Both punched, both NATs keep ports | Path |
+  |---|---|
+  | yes | `hop`: the hopper starts and must make a first hop both ways, as in direct mode |
+  | a punch failed | `relay`, `handoff_reason` = `punch` |
+  | a NAT changes ports | `relay`, `handoff_reason` = `ports` |
+  | the first hop failed | `relay`, `handoff_reason` = `hop` (the hopper is closed; its `hop_*` counters stay in the row) |
+
+- A link on the relay seals everything after the handshake, as `-relay
+  -direct` does. A hopping link keeps its relay channel bound; step 6b
+  will move a running link to it when hopping stops holding.
+- Not yet: a first hop that works at only one end leaves that pair split
+  (one side hopping, one on the relay; the mesh trial counts it as
+  `split`), and no link moves back from the relay to hopping. Both are
+  TODO(paper §5 Dynamic Handoff Mode) in `handoff.go`.
+
 ## Flags
 
 `punch -h` lists every flag. The direct channel's:
@@ -196,6 +232,7 @@ Relayed mode's:
 | Flag | Default | Meaning |
 |---|---|---|
 | `-relay` | off | every link through the TURN relay (with `-direct`: Noise through the relay, no hopping) |
+| `-handoff` | off | with `-direct`: each link hops where it can and goes through the relay where it cannot (uses the relay flags below; `-relay` is not needed) |
 | `-relay-server` | `198.18.0.102:3478` | the relay |
 | `-relay-user`, `-relay-pass` | `testbed`, `testbed` | its long-term credentials |
 
@@ -214,9 +251,16 @@ and in direct mode the handshake done), the ping and throughput measurements
 link's Data arrived, since start: the test's place in the run). Before mesh
 step 2, `name` and `room` were `role` and `session`.
 
+Every link also has `path`: what carried it once usable (`punch` for raw
+UDP, `hop` or `relay`; empty if it never became usable).
+
 Relayed mode adds `relayed`, `relay_addr` (our relayed address),
 `relay_ms` (start to the allocation), `peer_relay_addr` and
 `relay_bind_ms`; `rx_ip_mbit` then also counts ChannelData's 4 bytes.
+Handoff mode fills the same relay columns on every link, sets `handoff`
+(and not `relayed`), and adds `handoff_reason` on the links that stay on
+the relay: `punch`, `ports` or `hop`. Its `ready_ms` is when the link was
+on its path.
 
 Direct mode adds: `direct`, `noise`, `peer_key_from`, `initiator`,
 `handshake_ms`, `keeps_port`, `peer_keeps_port`, `hop_possible`, `hopping`,

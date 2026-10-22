@@ -29,7 +29,9 @@
 //
 // With Config.Relay set, every link goes through the TURN relay instead of
 // a hole punch (relay.go): the relayed baseline the direct channel is
-// compared against, with the same steps and columns.
+// compared against, with the same steps and columns. With Config.Handoff
+// as well (and Config.Direct), each link hops where hopping holds and uses
+// the relay where it does not (handoff.go).
 package peer
 
 import (
@@ -78,10 +80,14 @@ type Config struct {
 
 	Direct *DirectConfig // nil: raw UDP
 	Relay  *RelayConfig  // nil: punch a direct path; set: every link goes through the TURN relay
+	// Handoff, with Direct and Relay: each link hops where it can and goes
+	// through the relay where it cannot (handoff.go).
+	Handoff bool
 
 	Logf func(format string, args ...any)
 
-	unreachable netip.Addr // tests: drop all we send there, like a NAT that never lets that member in
+	unreachable  netip.Addr // tests: drop all we send there, like a NAT that never lets that member in
+	changesPorts bool       // tests: our NAT changes ports, like a symmetric NAT
 }
 
 // DirectConfig sets up the Port-Hopping Direct Channel. Zero durations take
@@ -170,7 +176,7 @@ func newRunner(cfg Config) *runner {
 	}
 	r.res = PeerResult{Name: cfg.Name, Room: cfg.Room, ID: idString(r.id), RateMbit: cfg.RateMbit, PacketBytes: cfg.Size,
 		StartUnixMs: float64(r.t0.UnixMicro()) / 1000}
-	r.res.Relayed = cfg.Relay != nil
+	r.res.Relayed, r.res.Handoff = cfg.Relay != nil && !cfg.Handoff, cfg.Handoff
 	if d := cfg.Direct; d != nil {
 		r.res.Direct, r.res.Noise, r.res.PeerKeyFrom = true, d.Noise, d.PeerKeyFrom
 		r.res.HopIntervalMs = ptr(ms(d.HopInterval))
@@ -217,6 +223,8 @@ func (r *runner) validate() error {
 		return errors.New("a room needs at least 2 peers")
 	case r.cfg.Direct != nil && r.cfg.Direct.HopInterval <= 0:
 		return errors.New("direct mode needs a hop interval")
+	case r.cfg.Handoff && (r.cfg.Direct == nil || r.cfg.Relay == nil):
+		return errors.New("handoff mode needs the direct channel and a relay")
 	}
 	return nil
 }

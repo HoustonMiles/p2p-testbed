@@ -122,9 +122,13 @@ func startPeer(t *testing.T, c Config) <-chan []*Result {
 // peerConfig is the i-th peer's config: short steps, and what extra sets.
 // checkPath: punched (and hop-connected in direct mode), or, relayed,
 // through a bound channel to a member we only ever knew by its relayed
-// address.
+// address; in handoff mode, either, as its path column says.
 func checkPath(t *testing.T, name string, r *Result) {
 	t.Helper()
+	if r.Handoff {
+		checkHandoffPath(t, name, r)
+		return
+	}
 	if r.Relayed {
 		if r.RelayBindMs == nil || r.PeerRelayAddr == nil || show(r.PeerRdvAddr) != *r.PeerRelayAddr || r.Punched {
 			t.Errorf("%s: relayed link: bind %s, introduced as %s, relayed address %s, punched %v",
@@ -140,6 +144,28 @@ func checkPath(t *testing.T, name string, r *Result) {
 	}
 	if r.Direct && !r.HopConnected {
 		t.Errorf("%s: not hop connected", name)
+	}
+}
+
+// checkHandoffPath: the relay channel is bound on every link, to a member
+// introduced by its own address; a hopping link punched and hopped, a
+// relayed one says why it is not hopping.
+func checkHandoffPath(t *testing.T, name string, r *Result) {
+	t.Helper()
+	if r.RelayBindMs == nil || r.PeerRelayAddr == nil || show(r.PeerRdvAddr) == *r.PeerRelayAddr {
+		t.Errorf("%s: bind %s, introduced as %s, relayed address %s", name, show(r.RelayBindMs), show(r.PeerRdvAddr), show(r.PeerRelayAddr))
+	}
+	switch r.Path {
+	case "hop":
+		if !r.Punched || !r.HopConnected || r.HandoffReason != "" {
+			t.Errorf("%s: hopping, but punched %v, hop connected %v, reason %q", name, r.Punched, r.HopConnected, r.HandoffReason)
+		}
+	case "relay":
+		if handoffReasons[r.HandoffReason] == "" || r.HopConnected {
+			t.Errorf("%s: on the relay, reason %q, hop connected %v", name, r.HandoffReason, r.HopConnected)
+		}
+	default:
+		t.Errorf("%s: path %q", name, r.Path)
 	}
 }
 
@@ -160,6 +186,7 @@ func peerConfig(name string, i int, extra Config) Config {
 		relay := *extra.Relay
 		c.Relay = &relay
 	}
+	c.Handoff = extra.Handoff
 	if extra.StepTimeout != 0 {
 		c.StepTimeout = extra.StepTimeout
 	}

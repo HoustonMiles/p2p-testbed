@@ -1,13 +1,15 @@
 // punch runs one peer of a peer-to-peer trial: raw UDP by default, the
 // Port-Hopping Direct Channel with -direct, through the TURN relay instead
 // of a hole punch with -relay (with -direct too: Noise through the relay,
-// without hopping). Peers meet in a room at the rendezvous and link with
-// every other member (a full mesh).
+// without hopping), or with -handoff -direct each link hopping where it
+// can and going through the relay where it cannot. Peers meet in a room at
+// the rendezvous and link with every other member (a full mesh).
 //
 //	punch -name a -room 42         # on peer-a
 //	punch -name b -room 42         # on peer-b, at the same time
 //	punch -name a -room 42 -direct -hop-interval 1s
 //	punch -name a -room 42 -relay -direct   # the relayed baseline
+//	punch -name a -room 42 -handoff -direct -hop-interval 1s
 //	punch -name a -room 42 -peers 3   # a room of three: links to both others
 //	punch -genkey /keys/a          # write /keys/a.key and /keys/a.pub, then exit
 //
@@ -38,7 +40,7 @@ func main() {
 	useDirect := flag.Bool("direct", false, "run the Port-Hopping Direct Channel instead of raw UDP")
 	directFlags(&d)
 	var rc peer.RelayConfig
-	useRelay := relayFlags(&rc)
+	useRelay := relayFlags(&rc, &c.Handoff)
 	keys := keyFlags()
 	genkey := flag.String("genkey", "", "write a new static keypair to `BASE`.key and BASE.pub, then exit")
 	quiet := flag.Bool("quiet", false, "no progress output on stderr")
@@ -56,9 +58,7 @@ func main() {
 		}
 		c.Direct = &d
 	}
-	if *useRelay {
-		c.Relay = &rc
-	}
+	setRelay(&c, &rc, *useRelay)
 	if !*quiet {
 		c.Logf = func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
 	}
@@ -99,12 +99,24 @@ func connectFlags(c *peer.Config) {
 	flag.DurationVar(&c.Linger, "linger", 500*time.Millisecond, "keep answering the peer this long before exiting")
 }
 
-func relayFlags(rc *peer.RelayConfig) *bool {
+func relayFlags(rc *peer.RelayConfig, handoff *bool) *bool {
 	use := flag.Bool("relay", false, "relayed mode: every link goes through the TURN relay instead of a hole punch")
+	flag.BoolVar(handoff, "handoff", false, "handoff mode (with -direct): each link hops where hopping holds and goes through the TURN relay where it does not")
 	flag.StringVar(&rc.Server, "relay-server", "198.18.0.102:3478", "relay: the TURN server")
 	flag.StringVar(&rc.Username, "relay-user", "testbed", "relay: TURN username")
 	flag.StringVar(&rc.Password, "relay-pass", "testbed", "relay: TURN password")
 	return use
+}
+
+// setRelay gives relayed and handoff mode the relay; handoff mode needs the
+// direct channel, which c already has if -direct was given.
+func setRelay(c *peer.Config, rc *peer.RelayConfig, useRelay bool) {
+	if c.Handoff && c.Direct == nil {
+		usage("-handoff needs -direct")
+	}
+	if useRelay || c.Handoff {
+		c.Relay = rc
+	}
 }
 
 func measureFlags(c *peer.Config) {

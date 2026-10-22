@@ -1,0 +1,37 @@
+# =============================================================================
+# Handoff mesh: does a mesh of mixed NATs come up whole?
+#
+# mesh_scale's mixed configuration (NAT types round-robin: a full cone,
+# b restricted, c port-restricted, d symmetric, e full cone, ...) in
+# handoff mode, every peer starting at once. In direct mode only the pairs
+# without a symmetric NAT come up (15 of 28 with 8 peers); here every pair
+# should, hopping where it can and through the relay where it cannot.
+#
+# Expected: pairs_usable = pairs (a full mesh) in every trial; pairs_hop =
+# the pairs without a symmetric NAT (4 peers: 3 of 6, 8: 15 of 28, 16: 66
+# of 120), pairs_relay = the rest, pairs_split = 0.
+#
+#   uv run python -m p2prunner run  experiments/handoff_mesh.toml
+#   uv run python -m p2prunner mesh results/handoff_mesh/<run>
+# =============================================================================
+
+name = "handoff_mesh"
+description = "Full mesh in handoff mode for 4 to 16 peers of mixed NAT types, all starting at once."
+trial = "mesh"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 120
+est_trial_s = 15          # pairs that cannot punch wait out -punch-timeout first
+args = "-handoff -direct -hop-interval 1s -punch-timeout 5s -pings 20 -ping-interval 50ms -rate-mbit 0"
+
+[matrix]
+peers = [4, 8, 16]
+net_profile = ["coast"]
+
+[[matrix.nat_mix]]
+name = "mixed"
+nats = ["full_cone", "restricted", "port_restricted", "symmetric"]

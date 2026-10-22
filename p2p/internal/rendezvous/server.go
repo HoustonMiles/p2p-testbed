@@ -108,10 +108,11 @@ func registered(body []byte) wire.Extras {
 // introduce tells the member at to where member id is, its key and its
 // relayed address. A member that registered a relayed address is
 // introduced by it alone: its own address is never handed out, so in
-// relayed mode no member learns another's IP, not even from here.
+// relayed mode no member learns another's IP, not even from here. In
+// handoff mode a member punches as well, so it is introduced by both.
 func (s *Server) introduce(roomID uint64, to netip.AddrPort, id uint64, m member) {
 	peer := m.addr
-	if m.extras.Relay.IsValid() {
+	if m.extras.Relay.IsValid() && !m.extras.Handoff {
 		peer = m.extras.Relay
 	}
 	body := wire.Intro{Self: to, Peer: peer, PeerID: id, Extras: m.extras}.Append(nil)

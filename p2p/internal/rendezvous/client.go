@@ -14,12 +14,13 @@ type Client struct {
 	Room, ID uint64
 	Key      []byte         // our static public key; nil in raw mode
 	Relay    netip.AddrPort // our relayed address on the TURN relay; invalid without one
+	Handoff  bool           // we punch as well as relay: the others may learn our own address
 }
 
 // Register is the packet to send: repeatedly until introduced, then often
 // enough that the registration never expires while running.
 func (c *Client) Register() []byte {
-	body := wire.Extras{Key: c.Key, Relay: c.Relay}.Append(nil)
+	body := wire.Extras{Key: c.Key, Relay: c.Relay, Handoff: c.Handoff}.Append(nil)
 	return wire.Packet{Type: wire.Register, Room: c.Room, From: c.ID, Body: body}.Append(nil)
 }
 

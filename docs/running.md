@@ -71,6 +71,8 @@ before `peers` existed, so older results still match.
 | `relay_detour` | `relay_path` on the coast profile with the relay 0, 10 and 40 ms out of the way (~10 min) |
 | `mesh_scale` | Full mesh of direct links for 2, 4, 8 and 16 peers, all starting at once, realistic (all port-restricted) and mixed NATs (~30 min) |
 | `mesh_join` | Peers joining a running mesh 0, 100, 500 and 2000 ms apart, 8 and 16 peers, realistic and mixed NATs: worst case against best case (~35 min) |
+| `handoff_matrix` | Handoff mode for every NAT pairing with and without CGNAT: 18 configurations should hop, the other 14 go through the relay (~1 h) |
+| `handoff_mesh` | Handoff mode for 4, 8 and 16 peers of mixed NAT types, all starting at once: every pair should come up, hopping or through the relay (~10 min) |
 
 **Trial types:** `nat_verify` (RFC 5780 check), `ping` (RTT from both peers to
 a WAN host), and `command`, which runs `cmd_a`/`cmd_b` on the peers. Each command
@@ -86,9 +88,12 @@ makes keys for peers that have none. With `stagger_ms`, peer a starts
 first, b `stagger_ms` later, and so on, each joining the mesh the earlier
 ones are running; 0 (the default) starts everyone at the same moment. Its trial row has
 mesh-level columns: `pairs` (N(N-1)/2), `pairs_usable` (hop-connected at
-both ends in direct mode, punched in raw mode), `pairs_hop`, `pairs_punch`,
-`pairs_relay`, `pairs_none`, `pairs_error`, `pairs_as_predicted` (the outcome RFC 4787
-predicts for the pair's NAT behaviours, `p2prunner/nat.py`),
+both ends in direct mode, punched in raw mode, hopping or through the relay
+in handoff mode), `pairs_hop`, `pairs_punch`, `pairs_relay`, `pairs_none`,
+`pairs_split` (handoff mode: one end hopping, the other on the relay),
+`pairs_error`, `pairs_as_predicted` (the outcome RFC 4787
+predicts for the pair's NAT behaviours, `p2prunner/nat.py`; in handoff mode
+`hop` where it predicts hopping and `relay` everywhere else),
 `time_to_usable_ms` (from the first peer's start until the last usable
 pair was ready at both ends) and `time_to_full_mesh_ms` (the same, when
 every pair is usable; with `stagger_ms` it includes the spacing itself;
@@ -191,6 +196,14 @@ pairing, including two symmetric NATs):
 ```bash
 docker compose exec peer-a punch -name a -room 43 -relay -direct
 docker compose exec peer-b punch -name b -room 43 -relay -direct
+```
+
+Handoff mode: hop if the pairing allows it, else the relay (each row's
+`path` and `handoff_reason` say which and why):
+
+```bash
+docker compose exec peer-a punch -name a -room 44 -handoff -direct
+docker compose exec peer-b punch -name b -room 44 -handoff -direct
 ```
 
 Use a new `-room` number for each try. `-name` labels the logs and results

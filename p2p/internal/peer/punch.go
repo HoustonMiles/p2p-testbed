@@ -28,7 +28,11 @@ func (l *link) punch() bool {
 func (l *link) finishPunch(start time.Duration) {
 	l.res.PeerAddr = ptr(l.remote.String())
 	l.res.PeerAddrChanged = ptr(l.remote != l.rdvAddr)
-	if !l.gotAck {
+	switch {
+	case !l.gotAck && l.r.cfg.Handoff:
+		l.logf("punch: no reply from %v; the relay carries the link", l.remote)
+		return
+	case !l.gotAck:
 		l.stop("punch: no reply from " + l.remote.String())
 		return
 	}

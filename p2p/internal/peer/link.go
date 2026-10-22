@@ -87,40 +87,78 @@ func (l *link) run() {
 // connect runs step 3 (a punch, or a channel through the relay) and, in
 // direct mode, the Noise handshake and what follows it.
 func (l *link) connect() bool {
-	if !l.reach() || !l.barrier(barrierWait{step: stepConnected, timeout: l.r.cfg.StepTimeout}) || !l.secure() {
+	if !l.reach() || !l.barrier(l.connected()) || !l.secure() {
 		return false
 	}
 	l.res.ReadyMs = ptr(ms(time.Since(l.r.t0)))
+	l.res.Path = l.path()
 	return true
 }
 
 func (l *link) reach() bool {
-	if l.r.relay != nil {
+	switch {
+	case l.r.cfg.Handoff:
+		return l.reachBoth()
+	case l.r.relay != nil:
 		return l.bindRelay()
 	}
 	return l.punch()
 }
 
+// connected is the barrier after step 3. Its value, whether we punched,
+// matters only in handoff mode.
+func (l *link) connected() barrierWait {
+	var punched uint64
+	if l.gotAck {
+		punched = 1
+	}
+	return barrierWait{step: stepConnected, value: punched, timeout: l.r.cfg.StepTimeout}
+}
+
 // secure runs the direct channel: hopping on a punched path, or, through
-// the relay, the handshake alone. We open sealed packets as soon as our
-// handshake is done, and seal ours once the member's barrier shows it is
-// done too; it sends that barrier only after its handshake, so we can
-// always open what it seals.
+// the relay, the handshake alone; in handoff mode the handshake through the
+// relay, then hopping if it can (handoff.go).
 func (l *link) secure() bool {
 	switch {
 	case l.r.cfg.Direct == nil:
 		return true
 	case l.r.relay == nil:
 		return l.startDirect()
-	case !l.handshake():
+	case !l.secureRelayed():
+		return false
+	case l.r.cfg.Handoff:
+		return l.choosePath()
+	}
+	return true
+}
+
+// secureRelayed runs the handshake through the relay. We open sealed
+// packets as soon as our handshake is done, and seal ours once the
+// member's barrier shows it is done too; it sends that barrier only after
+// its handshake, so we can always open what it seals. The barrier carries
+// whether our NAT changes ports, which handoff mode needs.
+func (l *link) secureRelayed() bool {
+	if !l.handshake() {
 		return false
 	}
 	l.opener.Store(l.hs.Session())
-	if !l.barrier(barrierWait{step: stepSecured, timeout: l.r.cfg.StepTimeout}) {
+	if !l.barrier(barrierWait{step: stepSecured, value: l.r.changesPorts(), timeout: l.r.cfg.StepTimeout}) {
 		return false
 	}
 	l.sealed.Store(l.hs.Session())
 	return true
+}
+
+// path is what carries the link's traffic: the hopper, the relay, or the
+// punched socket.
+func (l *link) path() string {
+	switch {
+	case l.hopper != nil:
+		return "hop"
+	case l.r.relay != nil:
+		return "relay"
+	}
+	return "punch"
 }
 
 func (l *link) usable() bool { return l.err == nil && !l.stopped }

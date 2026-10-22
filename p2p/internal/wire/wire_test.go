@@ -26,9 +26,10 @@ func TestIntro(t *testing.T) {
 	}
 	relay := netip.MustParseAddrPort("198.18.0.102:50001")
 	for _, e := range []Extras{{Key: bytes.Repeat([]byte{7}, KeySize)}, {Relay: relay},
-		{Key: bytes.Repeat([]byte{7}, KeySize), Relay: relay}} {
+		{Key: bytes.Repeat([]byte{7}, KeySize), Relay: relay}, {Relay: relay, Handoff: true},
+		{Key: bytes.Repeat([]byte{7}, KeySize), Relay: relay, Handoff: true}} {
 		in.Extras = e
-		if out, _ := ParseIntro(in.Append(nil)); !bytes.Equal(out.Key, e.Key) || out.Relay != e.Relay {
+		if out, _ := ParseIntro(in.Append(nil)); !bytes.Equal(out.Key, e.Key) || out.Relay != e.Relay || out.Handoff != e.Handoff {
 			t.Fatalf("extras %+v: got %+v", e, out.Extras)
 		}
 	}

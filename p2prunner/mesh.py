@@ -18,7 +18,9 @@ args can override).
 $seed, $trial and $<param> in args are filled in as for the command trial;
 the trial seed is the room. In direct mode, peers without a key in ./keys
 get one first. With -relay in args every link goes through the TURN relay,
-so every pair should connect whatever its NATs.
+so every pair should connect whatever its NATs. With -handoff (and
+-direct) each pair should hop where RFC 4787 says it can, and go through
+the relay everywhere else.
 
 Each peer prints one JSON row per link. They go to links.jsonl, one row per
 link end: `peer` and `member` name its two ends, `outcome` and `predicted`
@@ -36,28 +38,35 @@ from dataclasses import dataclass
 from p2prunner import nat
 from p2prunner.trials import fill
 
-# What a pair of links (both ends) can come to.
-OUTCOMES = ("hop", "relay", "punch", "none", "error")
+# What a pair of links (both ends) can come to. split: in handoff mode,
+# one end hopping and the other on the relay.
+OUTCOMES = ("hop", "relay", "punch", "none", "split", "error")
 
 
 @dataclass(frozen=True)
 class Mode:
-    """How the trial's peers link: punch's -direct and -relay."""
+    """How the trial's peers link: punch's -direct, -relay and -handoff."""
     direct: bool
     relayed: bool
+    handoff: bool = False
 
     @classmethod
     def of(cls, args: str) -> "Mode":
         flags = args.split()
-        return cls(direct="-direct" in flags, relayed="-relay" in flags)
+        return cls(direct="-direct" in flags, relayed="-relay" in flags, handoff="-handoff" in flags)
 
     @property
-    def usable(self) -> str:
-        """The outcome that makes a pair usable in this mode."""
-        return "relay" if self.relayed else "hop" if self.direct else "punch"
+    def usable(self) -> tuple[str, ...]:
+        """The outcomes that make a pair usable in this mode."""
+        if self.handoff:
+            return ("hop", "relay")
+        return ("relay",) if self.relayed else ("hop",) if self.direct else ("punch",)
 
     def predicted(self, cfg, a: str, b: str) -> str:
-        """Through the relay every pair connects; otherwise RFC 4787 decides."""
+        """Through the relay every pair connects; otherwise RFC 4787 decides,
+        and in handoff mode the relay takes every pair that cannot hop."""
+        if self.handoff:
+            return "hop" if nat.predicted(cfg, a, b, direct=True) == "hop" else "relay"
         return "relay" if self.relayed else nat.predicted(cfg, a, b, self.direct)
 
 
@@ -125,14 +134,25 @@ def pair_rows(names: list[str], rows: dict[str, list[dict]]) -> dict[tuple[str, 
 def pair_outcome(ends: tuple, mode: Mode) -> str:
     """hop: both ends hop-connected; relay: both ready through the relay;
     punch: both punched (and, in direct mode, could not hop); none: no
-    path; error: an end failed or is missing."""
+    path; error: an end failed or is missing. In handoff mode each end's
+    path column says which, and split means the ends disagree."""
     if any(e is None or e.get("error") for e in ends):
         return "error"
+    if mode.handoff:
+        return handoff_outcome(ends)
     if mode.relayed:
         return "relay" if both(ends, "ready_ms") else "none"
     if mode.direct and both(ends, "hop_connected"):
         return "hop"
     return "punch" if both(ends, "punched") else "none"
+
+
+def handoff_outcome(ends: tuple) -> str:
+    paths = {e.get("path") or "" for e in ends}
+    if len(paths) > 1:
+        return "split" if paths == {"hop", "relay"} else "none"
+    path = paths.pop()
+    return path if path in ("hop", "relay") and both(ends, "ready_ms") else "none"
 
 
 def both(ends: tuple, column: str) -> bool:
@@ -162,7 +182,7 @@ def mesh_metrics(cfg, pairs: dict, rows: dict, mode: Mode) -> dict:
     """The trial row: how much of the mesh came up, how much as RFC 4787
     predicts, and how long it took (time_to_* from the first peer's start)."""
     outcomes = {p: pair_outcome(ends, mode) for p, ends in pairs.items()}
-    usable = [p for p, o in outcomes.items() if o == mode.usable]
+    usable = [p for p, o in outcomes.items() if o in mode.usable]
     reported = [n for n, r in rows.items() if r]
     metrics = {
         "peers": len(rows), "peers_reported": len(reported),

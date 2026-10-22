@@ -42,6 +42,7 @@ type PeerResult struct {
 	ClockDriftPPM float64  `json:"clock_drift_ppm"`
 
 	Relayed   bool     `json:"relayed"`    // every link went through the TURN relay
+	Handoff   bool     `json:"handoff"`    // each link hopped where it could, else went through the relay
 	RelayAddr *string  `json:"relay_addr"` // our relayed address
 	RelayMs   *float64 `json:"relay_ms"`   // start to the allocation
 
@@ -62,7 +63,9 @@ type LinkResult struct {
 	PunchMs         *float64 `json:"punch_ms"` // start of punching to first PunchAck
 	PunchesSent     int      `json:"punches_sent"`
 	PunchesRecv     int      `json:"punches_recv"`
-	ReadyMs         *float64 `json:"ready_ms"`        // start to the link being usable: punched (relayed: channel bound) and connected; in direct mode also hopping both ways (relayed: the handshake done)
+	ReadyMs         *float64 `json:"ready_ms"`        // start to the link being usable: punched (relayed: channel bound) and connected; in direct mode also hopping both ways (relayed: the handshake done; handoff: on its path)
+	Path            string   `json:"path"`            // what carried the link once usable: punch (raw UDP), hop or relay
+	HandoffReason   string   `json:"handoff_reason"`  // handoff mode, on the relay: punch (failed), ports (a NAT changes them) or hop (the first hop failed)
 	PeerRelayAddr   *string  `json:"peer_relay_addr"` // relayed mode: the member's relayed address, where our traffic goes
 	RelayBindMs     *float64 `json:"relay_bind_ms"`   // relayed mode: time to bind our channel to it
 

@@ -62,7 +62,10 @@ func (w barrierWait) errFor(l *link) error {
 // still be bringing up a link that tests before ours.
 func (r *runner) setupTime() time.Duration {
 	c := r.cfg
-	t := c.PunchTimeout + c.StepTimeout // punch, connected
+	t := c.PunchTimeout + c.StepTimeout // punch (relayed: bind), connected
+	if c.Handoff {
+		t += c.PunchTimeout // bind, then punch
+	}
 	if c.Direct != nil {
 		t += r.handshakeTimeout() + 2*c.StepTimeout // handshake, secured, hopping
 	}

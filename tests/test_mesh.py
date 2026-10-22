@@ -130,6 +130,31 @@ class RelayedMeshTest(unittest.TestCase):
         self.assertEqual((m["pairs_relay"], m["pairs_usable"], m["pairs_as_predicted"], m["ok"]), (3, 3, 3, True))
 
 
+class HandoffMeshTest(unittest.TestCase):
+    """Three peers in handoff mode: a-b hop, a-c go through the relay (c is
+    symmetric, so it cannot hop), b-c disagree."""
+
+    def setUp(self):
+        hop, relay = {"path": "hop", "hop_connected": True}, {"path": "relay", "handoff_reason": "ports"}
+        rows = {"a": [link("a", "b", **hop), link("a", "c", **relay)],
+                "b": [link("b", "a", **hop), link("b", "c", **hop)],
+                "c": [link("c", "a", **relay), link("c", "b", **relay)]}
+        cfg = config(peers=3, nat_c="symmetric")
+        ctx = TrialContext(0, 1)
+        self.metrics = mesh(Peers(temp_dir(self), rows, keys=tuple("abc")), cfg, {"args": "-handoff -direct"}, ctx)
+        self.links = {(r["peer"], r["member"]): r for r in ctx.links}
+
+    def test_hop_and_relay_both_count_as_usable(self):
+        m = self.metrics
+        self.assertEqual((m["pairs_hop"], m["pairs_relay"], m["pairs_split"], m["pairs_usable"]), (1, 1, 1, 2))
+        self.assertIsNone(m["time_to_full_mesh_ms"])
+
+    def test_the_relay_is_predicted_where_hopping_is_not(self):
+        self.assertEqual(self.links["a", "c"]["predicted"], "relay")
+        self.assertEqual(self.links["a", "b"]["predicted"], "hop")
+        self.assertEqual(self.metrics["pairs_as_predicted"], 2)  # the split b-c pair was predicted relay
+
+
 class StaggerTest(unittest.TestCase):
     """Peers start stagger_ms apart, in name order, and wait long enough at
     the rendezvous for the last; join times count only earlier members."""

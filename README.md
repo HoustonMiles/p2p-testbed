@@ -40,7 +40,7 @@ starts a larger one (see [docs/testbed.md](docs/testbed.md#peers)).
 
 | Folder | What it is |
 |---|---|
-| `p2p/` | The system, in Go: rendezvous, STUN, TURN, Noise, the port-hopping direct channel, and `punch`, the peer program. Tests sit beside the code. |
+| `p2p/` | The system, in Go: rendezvous, STUN, TURN, Noise, the port-hopping direct channel, the handoff between it and the relay, and `punch`, the peer program. Tests sit beside the code. |
 | `testbed/` | The emulated network: router, host and coturn (STUN server and TURN relay) container images, and the host setup script |
 | `p2prunner/` | The experiment runner (Python): the address plan and compose file generator, runs experiment files, checks the testbed, writes and reports results |
 | `tests/` | The runner's tests (Python `unittest`, no Docker needed) |
@@ -56,5 +56,5 @@ starts a larger one (see [docs/testbed.md](docs/testbed.md#peers)).
 | [docs/results.md](docs/results.md) | Project status, the results so far (Experiments A and B), and notes for the paper |
 | [docs/testbed.md](docs/testbed.md) | Requirements, peers, settings, addresses, how the NAT types and links are built |
 | [docs/running.md](docs/running.md) | Running experiments, running `punch` by hand, reading results, the reports |
-| [docs/design.md](docs/design.md) | How the system works: code layout, rendezvous, the direct channel, flags and result columns |
+| [docs/design.md](docs/design.md) | How the system works: code layout, rendezvous, the direct channel, relayed and handoff modes, flags and result columns |
 | [docs/testing.md](docs/testing.md) | The Go and Python tests, and the fuzzers |

@@ -95,28 +95,43 @@ const KeySize = 32
 
 // Extras is the optional tail of a Register body and of a PeerInfo body: a
 // member's static public key, its relayed address on the TURN relay, or
-// both, in that order. Its length says which:
+// both, in that order; a member in handoff mode adds a flags byte after its
+// relayed address. Its length says which:
 //
 //	(empty) | key (32) | relayed address (IPv4, port: 6) | key + relayed address (38)
+//	relayed address + flags (7) | key + relayed address + flags (39)
 type Extras struct {
-	Key   []byte         // nil when the member has none (raw mode)
-	Relay netip.AddrPort // invalid when the member has no relayed address
+	Key     []byte         // nil when the member has none (raw mode)
+	Relay   netip.AddrPort // invalid when the member has no relayed address
+	Handoff bool           // the member punches too: introduce it by its own address as well as its relayed one
 }
 
-const addrLen = 6
+const (
+	addrLen     = 6
+	flagHandoff = 1
+)
 
 func (e Extras) Append(buf []byte) []byte {
 	buf = append(buf, e.Key...)
 	if e.Relay.IsValid() {
 		buf = appendAddr(buf, e.Relay)
+		if e.Handoff {
+			buf = append(buf, flagHandoff)
+		}
 	}
 	return buf
 }
 
-// ParseExtras decodes a tail; Key aliases b. A tail of any other length
-// carries nothing.
+// ParseExtras decodes a tail; Key aliases b. A tail of any other length,
+// or with any other flags, carries nothing.
 func ParseExtras(b []byte) Extras {
 	var e Extras
+	if n := len(b); n == addrLen+1 || n == KeySize+addrLen+1 {
+		if b[n-1] != flagHandoff {
+			return e
+		}
+		e.Handoff, b = true, b[:n-1]
+	}
 	switch len(b) {
 	case KeySize:
 		e.Key = b

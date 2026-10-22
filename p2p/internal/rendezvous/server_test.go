@@ -132,10 +132,33 @@ func keys(m map[uint64][]byte) []uint64 {
 // others are introduced to both, through the real Client's Register, and
 // never to its own address.
 func TestRelayedAddressIsPassedOn(t *testing.T) {
-	server := startServer(t, 5*time.Second)
 	relay := netip.MustParseAddrPort("198.18.0.102:50001")
+	in, _ := introduction(t, relay, false)
+	if in.Relay != relay || in.Handoff || !bytes.Equal(in.Key, bytes.Repeat([]byte{1}, wire.KeySize)) {
+		t.Fatalf("a introduced with %+v", in.Extras)
+	}
+	if in.Peer != relay {
+		t.Fatalf("a's own address %v was handed out; want only its relayed address", in.Peer)
+	}
+}
+
+// A member in handoff mode punches as well, so the others learn its own
+// address as well as its relayed one.
+func TestHandoffMemberIsIntroducedByBoth(t *testing.T) {
+	relay := netip.MustParseAddrPort("198.18.0.102:50001")
+	in, own := introduction(t, relay, true)
+	if in.Relay != relay || !in.Handoff || in.Peer != own {
+		t.Fatalf("a introduced as %v with %+v; want its own address %v and its relayed address", in.Peer, in.Extras, own)
+	}
+}
+
+// introduction registers a (ID 10, with a key and a relayed address) and b,
+// and returns b's introduction to a, and a's own address.
+func introduction(t *testing.T, relay netip.AddrPort, handoff bool) (wire.Intro, netip.AddrPort) {
+	t.Helper()
+	server := startServer(t, 5*time.Second)
 	a, b := newClient(t, 1, 10), newClient(t, 1, 11)
-	reg := (&Client{Server: server, Room: 1, ID: 10, Key: bytes.Repeat([]byte{1}, wire.KeySize), Relay: relay}).Register()
+	reg := (&Client{Server: server, Room: 1, ID: 10, Key: bytes.Repeat([]byte{1}, wire.KeySize), Relay: relay, Handoff: handoff}).Register()
 	a.conn.WriteToUDPAddrPort(reg, server)
 	b.register(server)
 	buf := make([]byte, 2048)
@@ -147,13 +170,7 @@ func TestRelayedAddressIsPassedOn(t *testing.T) {
 		}
 		p, _ := wire.Parse(buf[:n])
 		if in, ok := wire.ParseIntro(p.Body); ok && p.Type == wire.PeerInfo && in.PeerID == 10 {
-			if in.Relay != relay || !bytes.Equal(in.Key, bytes.Repeat([]byte{1}, wire.KeySize)) {
-				t.Fatalf("a introduced with %+v", in.Extras)
-			}
-			if in.Peer != relay {
-				t.Fatalf("a's own address %v was handed out; want only its relayed address", in.Peer)
-			}
-			return
+			return in, a.conn.LocalAddr().(*net.UDPAddr).AddrPort()
 		}
 	}
 }
