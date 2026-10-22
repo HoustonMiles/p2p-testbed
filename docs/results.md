@@ -29,7 +29,7 @@
 | Relay step 5a: TURN relay in the testbed (coturn at 198.18.0.102, long-term credentials, optional `RELAY_DELAY_MS`); Go TURN client (allocate, permissions, channels, ChannelData; no new dependencies) on a STUN message layer with MESSAGE-INTEGRITY; relay in `smoke`; NAT checks retry a peer that got no reply | done, tests pass; MESSAGE-INTEGRITY checked against the RFC 5769 sample; relay-to-relay through coturn from the host and from behind a port-restricted NAT | `p2p/internal/turn/`, `p2p/internal/stun/message.go`, `testbed/stun/` |
 | Relay step 5b: `punch -relay` (every link through the TURN relay, with Noise sealing everything after the handshake under `-direct`); the rendezvous carries relayed addresses and introduces relayed members by them alone; `relay` outcome in mesh trials; `smoke`/`verify` refuse a mix of two stacks; `run` says which configuration is left running | done, tests pass (fake TURN relay in the loopback tests; the relay sees no readable Data under `-direct`, mutation-checked); real coturn: two symmetric NATs, which cannot punch, connected with 20/20 pings and 20 Mbit/s; 8 peers of every NAT type: 28/28 pairs through the relay against 15/28 hop-connected | `p2p/internal/peer/relay.go`, `p2p/internal/wire`, `p2p/internal/rendezvous` |
 | Relay step 5c: `relay_matrix` (every NAT pairing through the relay; a 2-peer mesh trial), `relay_path` (direct_path's configurations through the relay: Experiment B's third arm), `relay_detour` (relay 0 / 10 / 40 ms away); `compare` counts relayed trials and lines up configurations that differ in one setting (`--ignore`) | done, tests pass; `relay_matrix` once per configuration in a VM without netem: 32/32 pairings connected through the relay, including the 8 that cannot punch | `experiments/relay_*.toml`, `p2prunner/reports.py` |
-| Handoff step 6a: `punch -handoff -direct` (each link binds its relay channel, punches, runs its handshake through the relay, then hops if both sides punched and both NATs keep ports, else stays on the relay); `path` and `handoff_reason` columns; mesh trials count hop and relay pairs as usable and `split` pairs; `handoff_matrix`, `handoff_mesh`. Also fixed: a late 401 to a resent Allocate no longer reads as wrong TURN credentials | done, tests pass (loopback handoff tests, mutation-checked); in a VM without netem: `handoff_matrix` twice per configuration, 64/64 connected on the predicted path (36 hop, 28 relay: 16 punch, 12 ports); 8 mixed peers, 3 trials: 28/28 pairs each (15 hop, 13 relay), no split pairs. Pairs that cannot punch are ready only after `-punch-timeout` (5 s here). On the coast profile (testbed, 2026-10-22) the hop-capable pairings then failed in about half their trials and every mixed mesh failed: a side that had started hopping answered the member's relayed setup through its hopper, which the member did not have yet. Fixed (answers go back the way they came); rerun pending | `p2p/internal/peer/handoff.go`, `p2p/internal/turn`, `experiments/handoff_*.toml` |
+| Handoff step 6a: `punch -handoff -direct` (each link binds its relay channel, punches, runs its handshake through the relay, then hops if both sides punched and both NATs keep ports, else stays on the relay); `path` and `handoff_reason` columns; mesh trials count hop and relay pairs as usable and `split` pairs; `handoff_matrix`, `handoff_mesh`. Also fixed: a late 401 to a resent Allocate no longer reads as wrong TURN credentials | done, tests pass (loopback handoff tests, mutation-checked); in a VM without netem: `handoff_matrix` twice per configuration, 64/64 connected on the predicted path (36 hop, 28 relay: 16 punch, 12 ports); 8 mixed peers, 3 trials: 28/28 pairs each (15 hop, 13 relay), no split pairs. Pairs that cannot punch are ready only after `-punch-timeout` (5 s here). A first coast run failed about half the trials of every hop-capable pairing and every mixed mesh: a side that had started hopping answered the member's relayed setup through its hopper, which the member did not have yet. Fixed (answers go back the way they came); the rerun below is clean | `p2p/internal/peer/handoff.go`, `p2p/internal/turn`, `experiments/handoff_*.toml` |
 | Result reports (standard library only) | done | `p2prunner hops`, `p2prunner compare` (`p2prunner/reports.py`) |
 | Tests: Go unit + fuzz tests beside the code, Python `unittest` in `tests/` | done | [testing.md](testing.md) |
 | **Result:** NAT matrix | 32/32 configurations verified, 96/96 trials | `results/nat_matrix/20261009-200208` |
@@ -38,6 +38,7 @@
 | **Result:** punch path (raw baseline) | 60/60 trials; RTT = profile RTT, link fully used | `results/punch_path/20261012-132335` |
 | **Result:** Experiment A, hop success | 320/320 trials; hopping holds in all 18 configurations where both NATs keep ports, fails in the rest, as the port check predicts | `results/hop_matrix/20261012-104647` + `results/hop_matrix_oneway/20261012-121649` |
 | **Result:** mesh join | 80/80 trials; every pair as RFC 4787 predicts at every size and spacing; join time about 425 ms in every configuration (about six coast round trips), so neither load nor start pattern matters up to 16 peers | `results/mesh_join/20261020-111009` |
+| **Result:** handoff (step 6a) | 350/350 trials, coast profile; every pair on the path RFC 4787 predicts: 320/320 matrix pairs (180 hop, 140 relay), 1540/1540 mesh pairs at 4, 8 and 16 mixed peers, no split pairs; pairs that punch are ready in about 0.5 s, pairs that cannot after the 5 s punch timeout | `results/handoff_matrix/20261022-110401`, `results/handoff_mesh/20261022-113919` |
 | **Result:** relay baseline | 380/380 trials; the relay adds 0.56 ms RTT on the path and exactly 2 x its detour off it; goodput matches header overhead exactly; it connects all 32 NAT configurations | `results/relay_path/20261020-141454`, `results/relay_detour/20261020-142341`, `results/relay_matrix/20261020-143233` |
 | **Result:** Experiment B, performance cost | 30/30 trials; no latency cost, -2.0% goodput (= Noise overhead), no loss from hopping | `results/direct_path/` (latest run, drain-based close) |
 
@@ -150,6 +151,31 @@ The overlap must cover queueing delay, not just the RTT.
 
 Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 `results/direct_path_overlap/20261012-140631`.
+
+## Handoff Manager: does every link connect, on the right path?
+
+`handoff_matrix` (all 16 pairings x side B on the WAN or behind CGNAT) and
+`handoff_mesh` (4, 8 and 16 peers, NAT types round-robin), coast profile,
+`-handoff -direct -hop-interval 1s -punch-timeout 5s`, 10 trials each.
+Summarised with `p2prunner mesh`.
+
+| Group | Configurations / pairs per trial | Path | Ready (median of medians) |
+|---|---|---|---|
+| No symmetric NAT on either side | 18 configurations | hop, 180/180 pairs | 0.50 to 0.60 s |
+| One side symmetric, the punch works | 6 | relay (`ports`), 60/60 | 0.46 to 0.53 s |
+| The punch fails (symmetric vs port-restricted or symmetric; a CGN counts as port-restricted) | 8 | relay (`punch`), 80/80 | 5.34 to 5.39 s |
+| Mixed mesh, 4 / 8 / 16 peers | 6 / 28 / 120 pairs | 3 / 15 / 66 hop, the rest relay, every trial | full mesh in 5.35 / 5.40 / 5.57 s |
+
+- Every pair connects, and on the predicted path: as_predicted = 1.00 in
+  all 35 configurations, and no pair ever split (one end hopping, the
+  other on the relay). With `-direct` alone the 8-peer mixed mesh gets 15
+  of its 28 pairs; with `-handoff` all 28.
+- Pairs that can punch decide in about half a second, whether they then
+  hop or stay on the relay. Pairs that cannot wait out the punch timeout
+  first, so a mixed mesh is complete only after about 5.4 s. Starting
+  every link on the relay at once and moving it to hopping when the punch
+  succeeds would remove that wait; it belongs with moving links back to
+  hopping (TODO in `handoff.go`).
 
 ## Paper updates pending
 
