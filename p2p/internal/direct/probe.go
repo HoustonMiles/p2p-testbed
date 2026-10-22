@@ -41,6 +41,9 @@ func (h *Hopper) dueProbes(now time.Time) []probe {
 }
 
 func (h *Hopper) sendProbe(p probe) {
+	if h.blocked() {
+		return
+	}
 	var flags byte
 	if p.heard {
 		flags = probeHeard

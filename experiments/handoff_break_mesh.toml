@@ -1,0 +1,40 @@
+# =============================================================================
+# Handoff break in a mesh: do only the broken peer's hopping links move?
+#
+# handoff_mesh's 8 mixed peers (a full cone, b restricted, c port-
+# restricted, d symmetric, e full cone, ...), coast profile. Three seconds
+# in, peer a's NAT starts dropping its direct traffic (see
+# p2prunner/breaks.py). a's 5 hopping links (with b, c, e, f and g) should
+# move to the relay; its 2 relayed links (with d and h, symmetric) and the
+# 10 hopping links between the others should not notice.
+#
+# Per trial: pairs_to_pivot = pairs_pivoted = 5 (a pivot anywhere else
+# would make pairs_pivoted larger), pivot_ms_p50 / _max.
+#
+#   uv run python -m p2prunner up --peers 8
+#   uv run python -m p2prunner run  experiments/handoff_break_mesh.toml
+#   uv run python -m p2prunner mesh results/handoff_break_mesh/<the run's folder>
+# =============================================================================
+
+name = "handoff_break_mesh"
+description = "Handoff mode, 8 mixed peers: one peer's direct path broken mid-run; only its hopping links should move."
+trial = "mesh"
+runs = 10
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 90
+est_trial_s = 16
+break_at_s = 3
+break_peers = "a"
+args = "-handoff -direct -hop-interval 1s -punch-timeout 5s -pings 200 -ping-interval 50ms -rate-mbit 0"
+
+[matrix]
+peers = [8]
+net_profile = ["coast"]
+
+[[matrix.nat_mix]]
+name = "mixed"
+nats = ["full_cone", "restricted", "port_restricted", "symmetric"]

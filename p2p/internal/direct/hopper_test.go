@@ -53,6 +53,43 @@ func TestHopperLoopback(t *testing.T) {
 	}
 }
 
+// OnHop hears of every hop as it ends: all ok while both peers hop (the
+// probes alone keep an idle link heard), then missed once b is gone.
+func TestOnHopReportsEachHop(t *testing.T) {
+	a, b := sessions(t)
+	lo := netip.MustParseAddr("127.0.0.1")
+	var ok, missed atomic.Int64
+	mk := func(sess *noise.Session, onHop func(bool)) *Hopper {
+		h, err := NewHopper(Config{Session: sess, Schedule: NewSchedule(sess.HopKey(), 100*time.Millisecond),
+			PeerIP: lo, LocalIP: lo, OnHop: onHop})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	ha := mk(a, func(heard bool) {
+		if heard {
+			ok.Add(1)
+		} else {
+			missed.Add(1)
+		}
+	})
+	defer ha.Close()
+	hb := mk(b, nil)
+	time.Sleep(600 * time.Millisecond)
+	hb.Close()
+	okBefore, missedBefore := ok.Load(), missed.Load()
+	time.Sleep(500 * time.Millisecond)
+	ha.Close() // no OnHop call after this, so the counts are final
+	st := ha.Stats()
+	if okBefore < 3 || missedBefore != 0 {
+		t.Errorf("while b hopped: %d ok, %d missed; want several ok, none missed", okBefore, missedBefore)
+	}
+	if missed.Load() < 3 || uint64(ok.Load()) != st.HopsOK || uint64(missed.Load()) != st.HopsMissed {
+		t.Errorf("after b left: OnHop %d ok, %d missed; Stats %d ok, %d missed", ok.Load(), missed.Load(), st.HopsOK, st.HopsMissed)
+	}
+}
+
 // hopperRun runs both hoppers and checks every packet arrived, unless lossy.
 func hopperRun(t *testing.T, offset, interval, lead, minOverlap, maxOverlap time.Duration, lossy bool) (Stats, Stats) {
 	a, b := sessions(t)

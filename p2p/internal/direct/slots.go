@@ -26,7 +26,7 @@ func (h *Hopper) step() {
 		return
 	}
 	want := h.wantedSlots(now)
-	h.retireSlots(want)
+	hops := h.retireSlots(want)
 	h.openWanted(want)
 	h.closeUnusedSockets()
 	probes := h.dueProbes(now)
@@ -36,6 +36,11 @@ func (h *Hopper) step() {
 	// Outside the lock, so a slow write never holds up Send or the readers.
 	for _, p := range probes {
 		h.sendProbe(p)
+	}
+	if h.cfg.OnHop != nil {
+		for _, ok := range hops {
+			h.cfg.OnHop(ok)
+		}
 	}
 }
 
@@ -57,7 +62,9 @@ func (h *Hopper) wantedSlots(now time.Time) map[uint64]bool {
 
 // retireSlots drops slots no longer wanted and records whether each hop
 // worked, i.e. whether anything from the peer arrived on that slot's port.
-func (h *Hopper) retireSlots(want map[uint64]bool) {
+// It returns each counted hop's result, for OnHop.
+func (h *Hopper) retireSlots(want map[uint64]bool) []bool {
+	var hops []bool
 	for slot, st := range h.slots {
 		if want[slot] {
 			continue
@@ -66,13 +73,16 @@ func (h *Hopper) retireSlots(want map[uint64]bool) {
 		if slot <= h.first {
 			continue // the peers start at different moments; see Stats
 		}
-		if st.sock != nil && st.sock.heard.Load() {
+		ok := st.sock != nil && st.sock.heard.Load()
+		if ok {
 			h.stats.hopsOK.Add(1)
 		} else {
 			h.stats.hopsMissed.Add(1)
 			h.logf("hop: slot %d: nothing arrived from the peer", slot)
 		}
+		hops = append(hops, ok)
 	}
+	return hops
 }
 
 func (h *Hopper) openWanted(want map[uint64]bool) {

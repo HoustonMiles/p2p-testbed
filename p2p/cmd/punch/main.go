@@ -140,6 +140,7 @@ func directFlags(d *peer.DirectConfig) {
 	flag.BoolVar(&d.HopForce, "hop-force", false, "direct: hop even when a NAT changes ports (measures the failure)")
 	flag.DurationVar(&d.ClockOffset, "clock-offset", 0, "direct: shift this peer's hop clock, e.g. 30ms or -30ms")
 	flag.Float64Var(&d.ClockDriftPPM, "clock-drift-ppm", 0, "direct: make this peer's hop clock run fast (+) or slow (-), parts per million")
+	flag.IntVar(&d.PivotAfter, "pivot-after", 3, "handoff: move a hopping link to the relay after this many missed hops in a row")
 }
 
 func flagSet(name string) bool {

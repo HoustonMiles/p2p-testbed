@@ -198,7 +198,7 @@ func (l *link) headerBytes() int64 {
 	if l.hopper != nil || l.sealed.Load() != nil {
 		n += noise.Overhead
 	}
-	if l.r.relay != nil {
+	if l.hopper == nil && l.r.relay != nil {
 		n += channelDataHeader
 	}
 	return n

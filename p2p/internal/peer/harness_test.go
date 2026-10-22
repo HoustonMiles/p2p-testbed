@@ -155,6 +155,9 @@ func checkHandoffPath(t *testing.T, name string, r *Result) {
 	if r.RelayBindMs == nil || r.PeerRelayAddr == nil || show(r.PeerRdvAddr) == *r.PeerRelayAddr {
 		t.Errorf("%s: bind %s, introduced as %s, relayed address %s", name, show(r.RelayBindMs), show(r.PeerRdvAddr), show(r.PeerRelayAddr))
 	}
+	if r.Pivoted {
+		t.Errorf("%s: moved to the relay at %s ms (%s) in a clean run", name, show(r.PivotMs), r.PivotReason)
+	}
 	switch r.Path {
 	case "hop":
 		if !r.Punched || !r.HopConnected || r.HandoffReason != "" {

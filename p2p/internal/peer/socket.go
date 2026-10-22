@@ -64,6 +64,9 @@ func (r *runner) deliver(m inbound, b []byte) {
 		return
 	}
 	if p.Type == wire.Data {
+		if m.sealed && m.link.watching.Load() {
+			m.link.askPivot(m.at, "member")
+		}
 		m.link.countData(m.at, len(b))
 		return
 	}
@@ -161,6 +164,13 @@ var linkHandlers = map[wire.Type]func(*link, inbound){
 }
 
 func (l *link) handle(m inbound) {
+	if m.pivot != "" {
+		l.pivot(m.at, m.pivot)
+		return
+	}
+	if l.watching.Load() && m.movedToRelay() {
+		l.pivot(m.at, "member")
+	}
 	if m.turn != nil {
 		l.onRelayReply(*m.turn)
 		return

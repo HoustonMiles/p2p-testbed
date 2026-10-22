@@ -160,7 +160,8 @@ func (l *link) fromRelay(at time.Duration, data []byte) {
 			if err != nil {
 				return // forged or replayed
 			}
-			data = plain
+			l.r.deliver(inbound{from: l.remote, at: at, link: l, sealed: true}, plain)
+			return
 		}
 	}
 	l.r.deliver(inbound{from: l.remote, at: at, link: l}, data)

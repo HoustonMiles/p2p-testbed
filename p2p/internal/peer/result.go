@@ -66,6 +66,9 @@ type LinkResult struct {
 	ReadyMs         *float64 `json:"ready_ms"`        // start to the link being usable: punched (relayed: channel bound) and connected; in direct mode also hopping both ways (relayed: the handshake done; handoff: on its path)
 	Path            string   `json:"path"`            // what carried the link once usable: punch (raw UDP), hop or relay
 	HandoffReason   string   `json:"handoff_reason"`  // handoff mode, on the relay: punch (failed), ports (a NAT changes them) or hop (the first hop failed)
+	Pivoted         bool     `json:"pivoted"`         // handoff mode: the hopping link moved to the relay while it ran
+	PivotMs         *float64 `json:"pivot_ms"`        // since start, when this side moved it
+	PivotReason     string   `json:"pivot_reason"`    // missed (hops in a row) or member (its traffic came through the relay)
 	PeerRelayAddr   *string  `json:"peer_relay_addr"` // relayed mode: the member's relayed address, where our traffic goes
 	RelayBindMs     *float64 `json:"relay_bind_ms"`   // relayed mode: time to bind our channel to it
 

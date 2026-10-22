@@ -22,6 +22,11 @@ so every pair should connect whatever its NATs. With -handoff (and
 -direct) each pair should hop where RFC 4787 says it can, and go through
 the relay everywhere else.
 
+With break_at_s set, the named peers' NATs start dropping their direct
+traffic that many seconds in (p2prunner/breaks.py): in handoff mode their
+hopping links should move to the relay. The trial row then also gets
+pivot_metrics.
+
 Each peer prints one JSON row per link. They go to links.jsonl, one row per
 link end: `peer` and `member` name its two ends, `outcome` and `predicted`
 describe the pair (see pair_outcome and nat.predicted). The trial row gets
@@ -36,6 +41,7 @@ import statistics
 from dataclasses import dataclass
 
 from p2prunner import nat
+from p2prunner.breaks import HopBreak
 from p2prunner.trials import fill
 
 # What a pair of links (both ends) can come to. split: in handoff mode,
@@ -80,10 +86,27 @@ def mesh(tb, cfg, params, ctx) -> dict:
     commands = peer_commands(names, ctx.seed, args, float(params.get("stagger_ms", 0)) / 1000)
     jobs = {n: (lambda n=n, cmd=cmd, delay=delay: tb.sh(f"peer-{n}", cmd, timeout=timeout + delay))
             for n, (cmd, delay) in commands.items()}
-    rows = read_rows(tb.parallel(jobs, all_at_once=True), ctx.raw)
+    hop_break = HopBreak.of(params)
+    outputs, broke_at = run_peers(tb, jobs, hop_break)
+    rows = read_rows(outputs, ctx.raw)
     pairs = pair_rows(names, rows)
     ctx.links.extend(link_rows(cfg, pairs, mode))
-    return mesh_metrics(cfg, pairs, rows, mode)
+    metrics = mesh_metrics(cfg, pairs, rows, mode)
+    if hop_break:
+        metrics.update(pivot_metrics(pairs, hop_break, broke_at))
+    return metrics
+
+
+def run_peers(tb, jobs: dict, hop_break: HopBreak | None) -> tuple[dict, float | None]:
+    """Run every peer at once, and the break alongside if there is one;
+    returns the peers' outputs and when the break took effect (Unix ms)."""
+    if hop_break is None:
+        return tb.parallel(jobs, all_at_once=True), None
+    try:
+        outputs = tb.parallel({**jobs, "break": lambda: hop_break.apply(tb)}, all_at_once=True)
+    finally:
+        hop_break.restore(tb)
+    return outputs, outputs.pop("break")
 
 
 def peer_commands(names: list[str], room: int, args: str, stagger_s: float) -> dict[str, tuple[str, float]]:
@@ -202,6 +225,26 @@ def pair_counts(cfg, outcomes: dict, mode: Mode) -> dict:
         "pairs": len(outcomes),
         **{f"pairs_{o}": sum(v == o for v in outcomes.values()) for o in OUTCOMES},
         "pairs_as_predicted": sum(o == mode.predicted(cfg, a, b) for (a, b), o in outcomes.items()),
+    }
+
+
+def pivot_metrics(pairs: dict, hop_break: HopBreak, broke_at: float) -> dict:
+    """How the hopping pairs with a broken end moved to the relay:
+    pairs_to_pivot of them, pairs_pivoted (both ends; counting any pair, so
+    a pivot without a break shows), pivot_ms_p50 / _max (from the break
+    until the second end moved) and pivot_lost_pings_p50 (pings lost per
+    link end while moving)."""
+    hopping = {p: ends for p, ends in pairs.items() if all(e and e.get("path") == "hop" for e in ends)}
+    pivoted = {p: ends for p, ends in hopping.items() if both(ends, "pivot_ms")}
+    times = sorted(max(e["start_unix_ms"] + e["pivot_ms"] for e in ends) - broke_at for ends in pivoted.values())
+    lost = sorted(e["pings_sent"] - e["pings_recv"] for ends in pivoted.values() for e in ends)
+    return {
+        "break_unix_ms": round(broke_at, 3),
+        "pairs_to_pivot": sum(hop_break.touches(*p) for p in hopping),
+        "pairs_pivoted": len(pivoted),
+        "pivot_ms_p50": round(statistics.median(times), 3) if times else None,
+        "pivot_ms_max": round(times[-1], 3) if times else None,
+        "pivot_lost_pings_p50": statistics.median(lost) if lost else None,
     }
 
 

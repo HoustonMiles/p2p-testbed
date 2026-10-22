@@ -2,8 +2,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from p2prunner import nat
+from p2prunner.breaks import RULE, HopBreak
 from p2prunner.experiment import expand_matrix
 from p2prunner.mesh import mesh
 from p2prunner.trials import TrialContext
@@ -55,6 +57,7 @@ class Peers:
 
     def __init__(self, root: Path, rows: dict[str, list[dict]], keys: tuple = ()):
         self.root, self.rows, self.commands, self.genkeys, self.at_once = root, rows, {}, [], None
+        self.execs = []
         (self.root / "keys").mkdir()
         for name in keys:
             (self.root / "keys" / f"{name}.key").write_text("k")
@@ -65,7 +68,9 @@ class Peers:
         return Done("".join(json.dumps(r) + "\n" for r in self.rows[name]) + "not json\n")
 
     def exec(self, service, command, timeout=0):
-        self.genkeys.append(command)
+        self.execs.append((service, command))
+        if command[0] == "punch":
+            self.genkeys.append(command)
         return Done()
 
     def parallel(self, jobs, all_at_once=False):
@@ -153,6 +158,39 @@ class HandoffMeshTest(unittest.TestCase):
         self.assertEqual(self.links["a", "c"]["predicted"], "relay")
         self.assertEqual(self.links["a", "b"]["predicted"], "hop")
         self.assertEqual(self.metrics["pairs_as_predicted"], 2)  # the split b-c pair was predicted relay
+
+
+class BreakTest(unittest.TestCase):
+    """Three peers in handoff mode, a's NAT broken: a-b hopped and moved to
+    the relay, a-c was on the relay all along, b-c hops on untouched."""
+
+    def setUp(self):
+        hop = {"path": "hop", "hop_connected": True, "pings_sent": 100, "pings_recv": 100}
+        moved = dict(hop, pivoted=True)
+        relay = {"path": "relay", "handoff_reason": "ports", "pings_sent": 100, "pings_recv": 100}
+        rows = {"a": [link("a", "b", **dict(moved, pivot_ms=1500.0, pings_recv=90)), link("a", "c", **relay)],
+                "b": [link("b", "a", **dict(moved, pivot_ms=1600.0, pings_recv=95, start_unix_ms=1100.0)),
+                      link("b", "c", **hop)],
+                "c": [link("c", "a", **relay), link("c", "b", **hop)]}
+        self.peers = Peers(temp_dir(self), rows, keys=tuple("abc"))
+        with mock.patch("p2prunner.breaks.time.time", return_value=2.0):  # the break: 2000 ms
+            self.metrics = mesh(self.peers, config(peers=3, nat_c="symmetric"),
+                                {"args": "-handoff -direct", "break_at_s": 0}, TrialContext(0, 1))
+
+    def test_only_the_broken_peers_nat_is_broken_then_mended(self):
+        self.assertEqual(self.peers.execs, [("nat-a", ["iptables", "-I", "TB_FWD", "1", *RULE[1:]]),
+                                            ("nat-a", ["iptables", "-D", *RULE])])
+
+    def test_pivot_metrics(self):
+        m = self.metrics
+        self.assertEqual((m["pairs_to_pivot"], m["pairs_pivoted"]), (1, 1))
+        self.assertEqual(m["pivot_ms_p50"], 2700.0 - 2000.0)  # b's end moved last
+        self.assertEqual(m["pivot_lost_pings_p50"], 7.5)
+        self.assertEqual(m["pairs_hop"], 2)  # pairs still count by the path they set up on
+
+    def test_break_settings(self):
+        self.assertIsNone(HopBreak.of({}))
+        self.assertEqual(HopBreak.of({"break_at_s": 3, "break_peers": "a, c"}), HopBreak(3.0, ("a", "c")))
 
 
 class StaggerTest(unittest.TestCase):

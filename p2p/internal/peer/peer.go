@@ -107,8 +107,10 @@ type DirectConfig struct {
 	HopForce         bool // hop even when a NAT changes ports, to measure the failure
 	ClockOffset      time.Duration
 	ClockDriftPPM    float64
+	PivotAfter       int // handoff mode: move a hopping link to the relay after this many missed hops in a row; 0: 3
 
-	dropHopSends bool // tests: mimic a NAT that blocks one direction of the hop path
+	dropHopSends   bool          // tests: mimic a NAT that blocks one direction of the hop path
+	blockHopsAfter time.Duration // tests: from this long after start, the hoppers send nothing, as behind a NAT that starts dropping them
 }
 
 // RelayConfig is the TURN relay for relayed mode (relay.go).
@@ -118,13 +120,15 @@ type RelayConfig struct {
 }
 
 type inbound struct {
-	from netip.AddrPort
-	at   time.Duration // since start
-	pkt  wire.Packet
-	stun []byte         // set instead of pkt for STUN messages
-	turn *turn.Response // set instead of pkt for a reply from the TURN relay
-	link *link          // the member it came from; nil for the servers
-	hop  bool           // came through the link's Hopper, so answer through it
+	from   netip.AddrPort
+	at     time.Duration // since start
+	pkt    wire.Packet
+	stun   []byte         // set instead of pkt for STUN messages
+	turn   *turn.Response // set instead of pkt for a reply from the TURN relay
+	pivot  string         // set instead of pkt: move the link to the relay, and why (handoff mode)
+	sealed bool           // came through the relay, sealed with the link's session
+	link   *link          // the member it came from; nil for the servers
+	hop    bool           // came through the link's Hopper, so answer through it
 }
 
 type runner struct {

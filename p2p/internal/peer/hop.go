@@ -91,6 +91,8 @@ func (l *link) startHopper() error {
 		PeerIP: l.remote.Addr(), Ports: l.r.ports,
 		Lead: d.HopLead, MinOverlap: d.HopMinOverlap, MaxOverlap: d.HopMaxOverlap, DrainIdle: d.HopDrainIdle,
 		OnPacket: l.onHop,
+		OnHop:    l.hopWatcher(),
+		Blocked:  l.r.hopsBlocked(),
 		Logf:     l.logf,
 	})
 	if err != nil {

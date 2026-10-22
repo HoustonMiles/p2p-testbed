@@ -173,7 +173,7 @@ the same steps and columns, so raw, direct and relayed runs line up.
   fails the link at once.
 - At the end the peer releases its allocation.
 
-## Handoff mode (Handoff Manager, step 6a)
+## Handoff mode (Handoff Manager, steps 6a and 6b)
 
 `punch -handoff -direct` keeps every link connected: each link hops where
 hopping holds and goes through the relay where it does not. Plain `-direct`
@@ -201,11 +201,29 @@ modes can be compared on the same configurations.
   | the first hop failed | `relay`, `handoff_reason` = `hop` (the hopper is closed; its `hop_*` counters stay in the row) |
 
 - A link on the relay seals everything after the handshake, as `-relay
-  -direct` does. A hopping link keeps its relay channel bound; step 6b
-  will move a running link to it when hopping stops holding.
-- Not yet: a first hop that works at only one end leaves that pair split
-  (one side hopping, one on the relay; the mesh trial counts it as
-  `split`), and no link moves back from the relay to hopping. Both are
+  -direct` does. A hopping link keeps its relay channel bound.
+- While it runs, a hopping link moves to the relay (`pivoted`,
+  `pivot_ms`, `pivot_reason`) when either
+  - `missed`: `-pivot-after` hops in a row (default 3) brought nothing
+    from the member. The hopper reports each hop as it ends
+    (`direct.Config.OnHop`); its probes keep even an idle link heard, so
+    an idle link notices too. Detection takes about that many slots plus
+    the overlap.
+  - `member`: the member's traffic after setup (pings, Data, later
+    barriers) arrives through the relay, sealed with the session: it has
+    moved. So whichever side notices first, the other follows within a
+    round trip.
+- Moving changes only where packets go: the channel is bound and the
+  session seals, and both sides open sealed relayed packets at any time.
+  The hopper closes; its `hop_*` counters are kept as they were then.
+- Only hops after the first hop both ways count, and none after the
+  link's measurements end (when a member may simply have left).
+- The same rule mends a pair split at setup (the mesh trial's `split`):
+  the side still hopping misses every hop.
+- Not yet: no link moves back from the relay to hopping, and a link that
+  cannot punch waits out `-punch-timeout` before it is usable. Starting on
+  the relay and moving to hopping once the punch works would fix both;
+  flood indicators as a second trigger wait for Experiment C. Both are
   TODO(paper §5 Dynamic Handoff Mode) in `handoff.go`.
 
 ## Flags
@@ -226,6 +244,7 @@ modes can be compared on the same configurations.
 | `-hop-drain-idle` | 50ms | quiet time that counts as drained |
 | `-hop-force` | off | hop even when a NAT changes ports, to measure the failure |
 | `-clock-offset`, `-clock-drift-ppm` | 0 | skew this peer's hop clock |
+| `-pivot-after` | 3 | handoff mode: move a hopping link to the relay after this many missed hops in a row |
 
 Relayed mode's:
 
@@ -260,7 +279,9 @@ Relayed mode adds `relayed`, `relay_addr` (our relayed address),
 Handoff mode fills the same relay columns on every link, sets `handoff`
 (and not `relayed`), and adds `handoff_reason` on the links that stay on
 the relay: `punch`, `ports` or `hop`. Its `ready_ms` is when the link was
-on its path.
+on its path. A hopping link that later moved to the relay keeps `path` =
+`hop` and adds `pivoted`, `pivot_ms` (since start, when this side moved)
+and `pivot_reason` (`missed` or `member`).
 
 Direct mode adds: `direct`, `noise`, `peer_key_from`, `initiator`,
 `handshake_ms`, `keeps_port`, `peer_keeps_port`, `hop_possible`, `hopping`,

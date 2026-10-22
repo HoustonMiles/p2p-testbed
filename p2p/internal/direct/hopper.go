@@ -34,9 +34,11 @@ const (
 // the boundary Send moves to the new ports. The old socket stays open until
 // what the peer sent to it has arrived (see drainCheck.decide).
 //
-// TODO(paper §5 Dynamic Handoff Mode): report missed hops and drain cutoffs
-// as they happen (a callback, not only Stats) so the Handoff Manager can
-// pivot to the relay while the session runs.
+// Config.OnHop reports each hop as it ends, so the Handoff Manager can move
+// a link to the relay while it runs.
+//
+// TODO(paper §5 Dynamic Handoff Mode): report drain cutoffs as they happen
+// too, if they turn out to signal a flood before hops are missed.
 //
 // TODO(paper §5 Threat Model, attacker position): the schedule is secret
 // only from off-path attackers. Ports travel in clear UDP headers, so an
@@ -96,7 +98,10 @@ type slotState struct {
 	peerHeard bool // the peer's probes say it hears us on this slot
 }
 
-var ErrNoSocket = errors.New("direct: no socket for the current slot")
+var (
+	ErrNoSocket = errors.New("direct: no socket for the current slot")
+	ErrBlocked  = errors.New("direct: sending blocked (Config.Blocked)")
+)
 
 // NewHopper opens the current slot's socket, so Send works at once, and
 // starts hopping in the background. Call Close to stop.
@@ -132,6 +137,10 @@ func NewHopper(cfg Config) (*Hopper, error) {
 // Send encrypts payload and sends it to the peer's port for the current
 // slot. Safe for concurrent use. Errors count as loss.
 func (h *Hopper) Send(payload []byte) error {
+	if h.blocked() {
+		h.stats.sendErrors.Add(1)
+		return ErrBlocked
+	}
 	st := h.currentSlot()
 	if st == nil || st.sock == nil {
 		h.stats.sendErrors.Add(1)
@@ -193,6 +202,8 @@ func (h *Hopper) Close() error {
 	})
 	return nil
 }
+
+func (h *Hopper) blocked() bool { return h.cfg.Blocked != nil && h.cfg.Blocked() }
 
 func (h *Hopper) closed() bool {
 	select {

@@ -73,6 +73,8 @@ before `peers` existed, so older results still match.
 | `mesh_join` | Peers joining a running mesh 0, 100, 500 and 2000 ms apart, 8 and 16 peers, realistic and mixed NATs: worst case against best case (~35 min) |
 | `handoff_matrix` | Handoff mode for every NAT pairing with and without CGNAT: 18 configurations should hop, the other 14 go through the relay (~1 h) |
 | `handoff_mesh` | Handoff mode for 4, 8 and 16 peers of mixed NAT types, all starting at once: every pair should come up, hopping or through the relay (~10 min) |
+| `handoff_break` | Handoff mode, realistic pairing, hopping broken on one side 3 s in: time to move to the relay and pings lost, 3 distances, after 1 or 3 missed hops (~20 min) |
+| `handoff_break_mesh` | The same in an 8-peer mixed mesh: only the broken peer's 5 hopping links should move (~4 min; `p2prunner up --peers 8` first) |
 
 **Trial types:** `nat_verify` (RFC 5780 check), `ping` (RTT from both peers to
 a WAN host), and `command`, which runs `cmd_a`/`cmd_b` on the peers. Each command
@@ -101,6 +103,17 @@ with `-relay` in `args` every pair should come out `relay`),
 and `join_ms_p50` / `join_ms_max` (from a peer's start until its usable
 links with the members already running were ready at both ends). Each link
 end's own row goes to `links.jsonl`.
+
+With `break_at_s` in `[params]`, the NATs of the peers in `break_peers`
+(default `a`) start dropping their direct traffic that many seconds in;
+traffic with the STUN, rendezvous and relay servers still passes, and the
+rule is removed after the trial (`p2prunner/breaks.py`). The trial row
+then also has `break_unix_ms`, `pairs_to_pivot` (hopping pairs with a
+broken end), `pairs_pivoted` (pairs both of whose ends moved to the relay),
+`pivot_ms_p50` / `pivot_ms_max` (from the break until the second end
+moved) and `pivot_lost_pings_p50`. The mesh report shows them as
+`pivoted`, `pivot_p50_ms` and `pivot_max_ms`, and marks `!` where a pair
+did not move as it should.
 
 **How trials are run:**
 - Each configuration's trials are split into blocks (`block_size`), and the

@@ -51,7 +51,10 @@ type link struct {
 	hs         *noise.Handshake
 	handshakeT time.Duration  // when our handshake began, since start
 	hopper     *direct.Hopper // once set, all traffic to the member goes through it
-	hopStats   *direct.Stats  // frozen when the link's measurements end
+	hopStats   *direct.Stats  // frozen when the link's measurements end, or when it moves to the relay
+
+	watching   atomic.Bool  // handoff mode: missed hops count, from the first hop until the measurements end
+	missedHops atomic.Int64 // handoff mode: missed hops in a row (the hopper's goroutine counts them)
 }
 
 func newLink(r *runner, in wire.Intro, at time.Duration) *link {
@@ -253,6 +256,7 @@ func (l *link) pairsAhead() int {
 // finishes; but a member that is done and gone must not count as missed
 // hops while we test other pairs.
 func (l *link) finish() {
+	l.watching.Store(false)
 	if l.hopper != nil && l.hopStats == nil {
 		st := l.hopper.Stats()
 		l.hopStats = &st

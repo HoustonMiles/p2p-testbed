@@ -180,5 +180,18 @@ class MeshReportTest(unittest.TestCase):
                          ("0.000", "4.00", "0.833", "0.000", "!"))
 
 
+    def test_pivots(self):
+        run = self.folders.write("mesh", [
+            self.mesh_trial("c00-aaa111", "peers=2", pairs_to_pivot=1, pairs_pivoted=1, pivot_ms_p50=600.0,
+                            pivot_ms_max=600.0),
+            self.mesh_trial("c00-aaa111", "peers=2", pairs_to_pivot=1, pairs_pivoted=0),
+            self.mesh_trial("c01-bbb222", "peers=2b"),
+        ])
+        broken, plain = self.columns(report(reports.mesh, [run]), 1)
+        self.assertEqual((broken["pivoted"], broken["pivot_p50_ms"], broken["pivot_max_ms"], broken["!"]),
+                         ("0.500", "600.00", "600.00", "!"))
+        self.assertEqual((plain["pivoted"], plain.get("!")), ("-", None))
+
+
 if __name__ == "__main__":
     unittest.main()

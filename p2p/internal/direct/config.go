@@ -38,6 +38,16 @@ type Config struct {
 	// concurrent use and fast. Payload is only valid during the call.
 	OnPacket func(Inbound)
 
+	// OnHop, if set, hears of each hop as its slot is retired: ok if
+	// something from the peer arrived on our port for that slot (the
+	// HopsOK and HopsMissed counters). It runs on the hopper's own
+	// goroutine, without the hopper's lock, and must not block.
+	OnHop func(ok bool)
+
+	// Blocked, if set, is fault injection: while it returns true the
+	// hopper sends nothing (Data or probes), as if a NAT dropped all of it.
+	Blocked func() bool
+
 	Logf func(format string, args ...any)
 }
 
