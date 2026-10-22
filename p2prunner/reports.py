@@ -206,8 +206,9 @@ def pivot_cells(trials: list[dict]) -> list[str]:
 
 
 def pivots_as_expected(trials: list[dict]) -> bool:
-    """Every hopping pair with a broken end moved, and no other pair."""
-    return all(r.get("pairs_pivoted", 0) == r.get("pairs_to_pivot", 0) for r in trials)
+    """Every hopping pair with a broken end moved, and no other link end."""
+    return all(r.get("pairs_pivoted", 0) == r.get("pairs_to_pivot", 0) and not r.get("pivots_unexpected")
+               for r in trials)
 
 
 def column(trials: list[dict], name: str) -> list[float]:

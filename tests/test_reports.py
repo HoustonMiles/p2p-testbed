@@ -186,8 +186,10 @@ class MeshReportTest(unittest.TestCase):
                             pivot_ms_max=600.0),
             self.mesh_trial("c00-aaa111", "peers=2", pairs_to_pivot=1, pairs_pivoted=0),
             self.mesh_trial("c01-bbb222", "peers=2b"),
+            self.mesh_trial("c02-ccc333", "peers=2c", pairs_to_pivot=1, pairs_pivoted=1, pivots_unexpected=1),
         ])
-        broken, plain = self.columns(report(reports.mesh, [run]), 1)
+        broken, plain, lone = self.columns(report(reports.mesh, [run]), 1)
+        self.assertEqual((lone["pivoted"], lone["!"]), ("1.00", "!"))
         self.assertEqual((broken["pivoted"], broken["pivot_p50_ms"], broken["pivot_max_ms"], broken["!"]),
                          ("0.500", "600.00", "600.00", "!"))
         self.assertEqual((plain["pivoted"], plain.get("!")), ("-", None))

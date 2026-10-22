@@ -110,6 +110,8 @@ traffic with the STUN, rendezvous and relay servers still passes, and the
 rule is removed after the trial (`p2prunner/breaks.py`). The trial row
 then also has `break_unix_ms`, `pairs_to_pivot` (hopping pairs with a
 broken end), `pairs_pivoted` (pairs both of whose ends moved to the relay),
+`pivots_unexpected` (link ends that moved on a pair without a broken end;
+should be 0),
 `pivot_ms_p50` / `pivot_ms_max` (from the break until the second end
 moved) and `pivot_lost_pings_p50`. The mesh report shows them as
 `pivoted`, `pivot_p50_ms` and `pivot_max_ms`, and marks `!` where a pair

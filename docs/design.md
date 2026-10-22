@@ -217,7 +217,8 @@ modes can be compared on the same configurations.
   session seals, and both sides open sealed relayed packets at any time.
   The hopper closes; its `hop_*` counters are kept as they were then.
 - Only hops after the first hop both ways count, and none after the
-  link's measurements end (when a member may simply have left).
+  link's measurements end (after its throughput test, or after its pings
+  when there is none), since a member that is done may simply leave.
 - The same rule mends a pair split at setup (the mesh trial's `split`):
   the side still hopping misses every hop.
 - Not yet: no link moves back from the relay to hopping, and a link that

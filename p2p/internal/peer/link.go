@@ -78,6 +78,9 @@ func (l *link) run() {
 		l.ping()
 	}
 	l.pinged <- struct{}{}
+	if l.r.cfg.RateMbit == 0 {
+		l.watching.Store(false) // nothing more to measure: the member may leave
+	}
 	l.awaitTurn()
 	if l.usable() && l.r.cfg.RateMbit > 0 {
 		l.throughputTest()

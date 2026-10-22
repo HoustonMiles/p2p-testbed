@@ -230,18 +230,21 @@ def pair_counts(cfg, outcomes: dict, mode: Mode) -> dict:
 
 def pivot_metrics(pairs: dict, hop_break: HopBreak, broke_at: float) -> dict:
     """How the hopping pairs with a broken end moved to the relay:
-    pairs_to_pivot of them, pairs_pivoted (both ends; counting any pair, so
-    a pivot without a break shows), pivot_ms_p50 / _max (from the break
-    until the second end moved) and pivot_lost_pings_p50 (pings lost per
-    link end while moving)."""
+    pairs_to_pivot of them, pairs_pivoted (both ends; counting any pair),
+    pivots_unexpected (link ends that moved on a pair without a broken
+    end; should be 0), pivot_ms_p50 / _max (from the break until the second
+    end moved) and pivot_lost_pings_p50 (pings lost per link end while
+    moving)."""
     hopping = {p: ends for p, ends in pairs.items() if all(e and e.get("path") == "hop" for e in ends)}
     pivoted = {p: ends for p, ends in hopping.items() if both(ends, "pivot_ms")}
+    unexpected = sum(bool(e.get("pivoted")) for p, ends in hopping.items() if not hop_break.touches(*p) for e in ends)
     times = sorted(max(e["start_unix_ms"] + e["pivot_ms"] for e in ends) - broke_at for ends in pivoted.values())
     lost = sorted(e["pings_sent"] - e["pings_recv"] for ends in pivoted.values() for e in ends)
     return {
         "break_unix_ms": round(broke_at, 3),
         "pairs_to_pivot": sum(hop_break.touches(*p) for p in hopping),
         "pairs_pivoted": len(pivoted),
+        "pivots_unexpected": unexpected,
         "pivot_ms_p50": round(statistics.median(times), 3) if times else None,
         "pivot_ms_max": round(times[-1], 3) if times else None,
         "pivot_lost_pings_p50": statistics.median(lost) if lost else None,

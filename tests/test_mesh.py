@@ -183,10 +183,19 @@ class BreakTest(unittest.TestCase):
 
     def test_pivot_metrics(self):
         m = self.metrics
-        self.assertEqual((m["pairs_to_pivot"], m["pairs_pivoted"]), (1, 1))
+        self.assertEqual((m["pairs_to_pivot"], m["pairs_pivoted"], m["pivots_unexpected"]), (1, 1, 0))
         self.assertEqual(m["pivot_ms_p50"], 2700.0 - 2000.0)  # b's end moved last
         self.assertEqual(m["pivot_lost_pings_p50"], 7.5)
         self.assertEqual(m["pairs_hop"], 2)  # pairs still count by the path they set up on
+
+    def test_a_lone_end_moving_elsewhere_counts_as_unexpected(self):
+        rows = {n: [link(n, m, path="hop", hop_connected=True, pings_sent=100, pings_recv=100) for m in "abc" if m != n]
+                for n in "abc"}
+        rows["b"][1]["pivoted"], rows["b"][1]["pivot_ms"] = True, 900.0  # b's end of b-c: no broken end
+        with mock.patch("p2prunner.breaks.time.time", return_value=2.0):
+            m = mesh(Peers(temp_dir(self), rows, keys=tuple("abc")), config(peers=3),
+                     {"args": "-handoff -direct", "break_at_s": 0}, TrialContext(0, 1))
+        self.assertEqual((m["pairs_to_pivot"], m["pairs_pivoted"], m["pivots_unexpected"]), (2, 0, 1))
 
     def test_break_settings(self):
         self.assertIsNone(HopBreak.of({}))

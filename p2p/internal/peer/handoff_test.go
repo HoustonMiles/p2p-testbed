@@ -164,3 +164,26 @@ func TestMovedToRelay(t *testing.T) {
 		}
 	}
 }
+
+// Without a throughput test a member is done with a link once both sides
+// have pinged, and may leave. c leaves early; b's link with it stays open
+// while b waits for its link with a (which cannot punch). The hops c no
+// longer answers are not a failure: nothing moves to the relay.
+func TestLoopbackHandoffMemberDoneIsNotAFailure(t *testing.T) {
+	relay := startRelay(t)
+	names := []string{"a", "b", "c"}
+	addr := map[string]netip.Addr{"a": netip.MustParseAddr("127.0.0.2"), "b": netip.MustParseAddr("127.0.0.3")}
+	cfg := handoffConfig(relay)
+	results := runRoom(t, names, cfg, trustRoom(names), func(c *Config) {
+		c.RateMbit, c.PunchTimeout = 0, 3*time.Second
+		c.unreachable = addr[map[string]string{"a": "b", "b": "a"}[c.Name]]
+	})
+	for name, rows := range results {
+		for _, r := range rows {
+			if r.Error != "" || r.Pivoted || r.PingsRecv != 20 {
+				t.Errorf("%s->%s: error %q, pivoted %v (%s at %s ms), %d/20 pings",
+					name, r.PeerID[:4], r.Error, r.Pivoted, r.PivotReason, show(r.PivotMs), r.PingsRecv)
+			}
+		}
+	}
+}
