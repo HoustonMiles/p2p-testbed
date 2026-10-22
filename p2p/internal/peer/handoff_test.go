@@ -75,6 +75,25 @@ func TestLoopbackHandoffRelaysWhenPortsChange(t *testing.T) {
 	}
 }
 
+// a's Barriers after the handshake are all lost, so b passes that step
+// only on a's BarrierAck. a has passed it already and started hopping; b
+// has not, so the ack must go back through the relay, the way b's
+// Barrier came (on a long path this happens without any loss).
+func TestLoopbackHandoffAnswersThroughTheRelay(t *testing.T) {
+	relay := startRelay(t)
+	results := runPair(t, handoffConfig(relay), withKeys, func(c *Config) {
+		if c.Name == "a" {
+			c.dropBarrier = stepSecured
+		}
+	})
+	checkResults(t, results)
+	for name, r := range results {
+		if r.Path != "hop" {
+			t.Errorf("%s: path %q (%s), want hop", name, r.Path, r.HandoffReason)
+		}
+	}
+}
+
 // Handoff mode without the pieces it needs is a usage error.
 func TestHandoffNeedsDirectAndRelay(t *testing.T) {
 	for _, cfg := range []Config{{Handoff: true, Relay: &RelayConfig{}}, {Handoff: true, Direct: &DirectConfig{HopInterval: time.Second}}} {

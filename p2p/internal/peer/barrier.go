@@ -82,7 +82,7 @@ func (l *link) meet(w barrierWait) bool {
 	l.reached, l.myValue[w.step] = w.step, w.value
 	return l.pump(w.timeout, 50*time.Millisecond,
 		func() {
-			if !w.passed(l) {
+			if !w.passed(l) && w.step != l.r.cfg.dropBarrier {
 				l.send(wire.Barrier, w.step, wire.U64(w.value))
 			}
 		},

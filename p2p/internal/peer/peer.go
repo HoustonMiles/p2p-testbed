@@ -88,6 +88,7 @@ type Config struct {
 
 	unreachable  netip.Addr // tests: drop all we send there, like a NAT that never lets that member in
 	changesPorts bool       // tests: our NAT changes ports, like a symmetric NAT
+	dropBarrier  uint64     // tests: never send our Barrier for this step, only answer the member's, as if every one were lost
 }
 
 // DirectConfig sets up the Port-Hopping Direct Channel. Zero durations take

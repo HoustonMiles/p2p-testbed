@@ -281,13 +281,14 @@ func (l *link) onHop(in direct.Inbound) {
 }
 
 // reply answers m the way it came, so a member still one step behind
-// (before its Hopper is up) keeps getting answers on the punched socket.
+// (before its Hopper is up) keeps getting answers on the punched socket,
+// or in handoff mode through the relay.
 func (l *link) reply(m inbound, t wire.Type, seq uint64, body []byte) {
 	switch {
 	case m.hop && l.hopper != nil:
 		l.sendHop(wire.Packet{Type: t, Seq: seq, Body: body})
 	case l.r.relay != nil:
-		l.send(t, seq, body)
+		l.transmit(l.seal(l.packet(t, seq, body)))
 	default:
 		l.r.sendTo(m.from, t, seq, body)
 	}
