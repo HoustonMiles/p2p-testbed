@@ -4,11 +4,7 @@ A Docker testbed for the port-hopping vs. relay experiments. Up to 255
 peers sit behind real Linux NAT routers (optionally behind carrier-grade NAT too), with
 simulated latency, jitter, loss and link capacity between them.
 
-```
-[peer-a]--lan_a--[nat-a]--+------------------ wan ------------------+--[nat-b]--lan_b--[peer-b]
-                          |                                         |
-                          +--carrier_a--[cgn-a]--wan    wan--[cgn-b]--carrier_b--+
-```
+![testbed topology](docs/testbed-topology-gray.png)
 
 Research question: can synchronized port-hopping on a Noise-encrypted direct
 P2P channel give DoS resilience comparable to a TURN relay, while keeping
