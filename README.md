@@ -8,9 +8,9 @@ simulated latency, jitter, loss and link capacity between them.
 
 Research question: can synchronized port-hopping on a Noise-encrypted direct
 P2P channel give DoS resilience comparable to a TURN relay, while keeping
-direct-path latency and throughput, against conventional and AI-driven
-attackers across NAT types? The system under test is a full mesh of pairwise
-direct links.
+direct-path latency and throughput, against outside attackers (conventional
+and AI-driven) across NAT types? The system under test is a full mesh of
+pairwise direct links, compared with the same mesh through a TURN relay.
 
 ## Quick start
 

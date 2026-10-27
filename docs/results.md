@@ -45,9 +45,13 @@
 | Part | What it is for |
 |---|---|
 | Full mesh, next: per-peer clock offsets in mesh trials, port clashes between a peer's links, a long-running mesh (members leaving and rejoining) | The paper's system is a mesh of pairwise direct links |
-| Handoff Manager | Falls back to the relay when `hop_possible` is false or hopping stops holding |
-| Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive) | DoS experiments |
+| Goodput over time: sample goodput every ~100 ms instead of one total per run | Experiment C's goodput under attack and recovery time depend on it |
+| Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive), all outside attackers | DoS experiments |
 | Experiment C | Attack resilience, direct hopping vs relay (`hop_drain_cutoffs`, `hop_unrouted`, `hop_foreign`, `hop_auth_failed` are there for it) |
+| Rendezvous hardening: a room-admission token in Register (members are those that share it) and a per-source registration rate limit, plus an address-harvesting experiment | Today anyone who knows a room number learns its members' addresses; an outside attacker should not be able to find peers to flood |
+| Relay placement sweep (`relay_detour` over more detours and distances) | The relay's latency cost is its detour; one curve shows how it depends on placement |
+| Port-changing CGN (a CGN mode that rewrites source ports) | The testbed's CGNs keep ports, so CGNAT never breaks hopping here; many real CGNs would (threat to validity) |
+| Handoff Manager: prototyped on a separate branch (setup choice of hop or relay per link, and moving a live link to the relay); not on main | Out of scope for this paper: future work |
 | Clock experiment files | Sweep `-clock-offset` / `-clock-drift-ppm` against the hop tolerance (min of `-hop-lead` and `-hop-min-overlap`); `[params]` keys can now be matrix keys, so one file can sweep a value given to every peer; a different offset per peer needs a mesh-trial parameter |
 | Rerun `direct_path` | Only to record the new `hop_drain_cutoffs` column (expected 0); the numbers below are already final |
 
@@ -80,8 +84,8 @@ Summarised with `p2prunner hops`.
 
 The port check made before hopping (`hop_possible`: STUN-mapped port equals
 the local port on both sides) predicted the outcome in all 32
-configurations, so the handoff to the relay can be decided before any hop
-is tried. CGNAT does not break hopping here only because both Linux NAT
+configurations, so whether a pair needs the relay can be known before any
+hop is tried. CGNAT does not break hopping here only because both Linux NAT
 layers keep the source port (see the paper notes: threats to validity).
 
 ## Experiment B: what do Noise, hopping and relaying cost?
@@ -157,11 +161,28 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
   two authenticated peers"). In each pair the lower static key initiates.
   Peers meet in rendezvous rooms; "already in a network" means each peer
   holds the members' public keys (a key directory).
-- Threat model: the rendezvous is unauthenticated, so anyone who knows a
-  room number learns its members' addresses (not their traffic: the
-  handshake still proves keys). Say so, or authenticate Register. In
-  relayed mode it hands out only relayed addresses, so members never learn
-  each other's IPs; the rendezvous and the relay themselves still see them.
+- Scope: the paper compares the direct port-hopping channel with the TURN
+  relay (reach: Experiment A, cost: Experiment B, resilience under attack:
+  Experiment C). The dynamic handoff between them is future work (prototyped
+  on a separate branch).
+- Threat model: outside attackers only (off-path, not members of the room).
+  A malicious member is out of scope. Today the rendezvous is
+  unauthenticated, so anyone who knows a room number learns its members'
+  addresses (not their traffic: the handshake still proves keys); the
+  rendezvous hardening (room-admission token, registration rate limit)
+  closes that, and is in scope. The token travels in the clear, so it stops
+  an attacker who cannot see the rendezvous's own traffic; encrypting
+  registration would also stop one who can. In relayed mode the rendezvous
+  hands out only relayed addresses, so members never learn each other's
+  IPs; the rendezvous and the relay themselves still see them. Port-hopping
+  is an off-path defence: it hides the current port, not the IP, and an
+  on-path observer can follow it.
+- Future work: insider mitigations (per-peer rate limiting; a shared
+  reputation or blocklist, which needs Sybil and false-accusation
+  resistance and works cleanly only for provable misbehaviour; eviction by
+  the rendezvous), the dynamic handoff, multi-hop routing through peers or
+  a DHT for anonymity (hides the IP from the peer, at higher latency), IP
+  hopping for peers with several addresses.
 - Procedures: the rendezvous is UDP, not WebSocket (it must see each peer's
   public UDP mapping for the punch); it carries the static public keys. The
   handshake is Noise KK, IK or XX (`-noise`), matching the "peers already
