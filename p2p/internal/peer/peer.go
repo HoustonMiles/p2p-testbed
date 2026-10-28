@@ -74,6 +74,8 @@ type Config struct {
 	Size     int           // UDP payload bytes per Data packet
 	Drain    time.Duration // wait for queued packets after each direction
 
+	SampleInterval time.Duration // throughput rate over time in intervals this long; 0: off
+
 	Linger time.Duration // keep answering the members this long before exiting
 
 	Direct *DirectConfig // nil: raw UDP
@@ -170,6 +172,9 @@ func newRunner(cfg Config) *runner {
 	}
 	r.res = PeerResult{Name: cfg.Name, Room: cfg.Room, ID: idString(r.id), RateMbit: cfg.RateMbit, PacketBytes: cfg.Size,
 		StartUnixMs: float64(r.t0.UnixMicro()) / 1000}
+	if cfg.SampleInterval > 0 {
+		r.res.SeriesMs = ptr(ms(cfg.SampleInterval))
+	}
 	r.res.Relayed = cfg.Relay != nil
 	if d := cfg.Direct; d != nil {
 		r.res.Direct, r.res.Noise, r.res.PeerKeyFrom = true, d.Noise, d.PeerKeyFrom

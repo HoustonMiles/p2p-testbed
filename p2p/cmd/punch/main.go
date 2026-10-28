@@ -115,6 +115,7 @@ func measureFlags(c *peer.Config) {
 	flag.DurationVar(&c.Duration, "duration", 2*time.Second, "throughput test: duration per direction")
 	flag.IntVar(&c.Size, "size", 1200, "throughput test: UDP payload bytes per packet")
 	flag.DurationVar(&c.Drain, "drain", time.Second, "throughput test: wait for queued packets after each direction")
+	flag.DurationVar(&c.SampleInterval, "sample-interval", 50*time.Millisecond, "throughput test: also record the rate over time in intervals this long (0 to skip)")
 }
 
 func directFlags(d *peer.DirectConfig) {

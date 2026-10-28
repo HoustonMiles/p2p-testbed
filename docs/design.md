@@ -214,6 +214,21 @@ and in direct mode the handshake done), the ping and throughput measurements
 link's Data arrived, since start: the test's place in the run). Before mesh
 step 2, `name` and `room` were `role` and `session`.
 
+The throughput test also records its rate over time, in intervals of
+`-sample-interval` (default 50 ms; 0 turns it off): `series_ms` (the
+interval, a peer column), and per link `tx_series_mbit` (what we sent) and
+`rx_series_mbit` (what arrived), each a list of Mbit/s per interval, with
+`tx_series_start_ms` / `rx_series_start_ms` when the first interval starts,
+since start. Intervals are fixed steps of the peer's own clock, so with
+`start_unix_ms` every series lines up with the other end's and with an
+attack's timing; the first and last are usually partly filled, and an
+interval with nothing in it between two with data reads 0. The rx series
+ends with the last packet that arrived, so a link that never recovers
+shows as a series that stops early: compare it with the sender's tx series.
+`p2prunner/goodput.py` turns these into goodput before, during and after
+an attack and the recovery time (back to 90% of the rate before, for three
+intervals in a row).
+
 Relayed mode adds `relayed`, `relay_addr` (our relayed address),
 `relay_ms` (start to the allocation), `peer_relay_addr` and
 `relay_bind_ms`; `rx_ip_mbit` then also counts ChannelData's 4 bytes.

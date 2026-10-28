@@ -11,9 +11,6 @@ import (
 
 // TODO(paper §5 Measures #4): record CPU usage per peer during throughput,
 // and compare with iperf3 as the paper's reference tool.
-//
-// TODO(paper §5 Measures #5-6): goodput under attack and recovery time need
-// goodput sampled over time (e.g. every 100 ms), not one total per run.
 
 const ipUDPHeader = 28
 
@@ -122,19 +119,23 @@ func (l *link) sendData() uint64 {
 	pkt := wire.Packet{Type: wire.Data, Room: r.cfg.Room, From: r.id,
 		Body: make([]byte, size-wire.HeaderLen)}.Append(nil)
 	var sent uint64
+	tx := series{every: r.cfg.SampleInterval}
 	start := time.Now()
 	l.pump(r.cfg.Duration+time.Second, time.Millisecond,
 		func() {
 			due := uint64(math.Min(time.Since(start).Seconds(), r.cfg.Duration.Seconds()) * pps)
+			at := time.Since(r.t0)
 			for ; sent < due; sent++ {
 				wire.PutSeq(pkt, sent)
 				l.sendDataPacket(pkt)
+				tx.add(at, len(pkt))
 			}
 		},
 		func() bool { return time.Since(start) >= r.cfg.Duration })
 	elapsed := time.Since(start).Seconds()
 	l.res.TxPackets = ptr(int64(sent))
 	l.res.TxMbit = ptr(float64(sent) * float64(size) * 8 / elapsed / 1e6)
+	l.res.TxSeriesStartMs, l.res.TxSeriesMbit = tx.result()
 	l.logf("throughput: sent %d packets (%.2f Mbit/s)", sent, *l.res.TxMbit)
 	return sent
 }
@@ -154,6 +155,7 @@ func (l *link) sendDataPacket(pkt []byte) {
 type rxCounts struct {
 	packets, bytes int64
 	first, last    time.Duration
+	series         series
 }
 
 func (l *link) countData(at time.Duration, n int) {
@@ -165,11 +167,13 @@ func (l *link) countData(at time.Duration, n int) {
 	l.rx.packets++
 	l.rx.bytes += int64(n)
 	l.rx.last = at
+	l.rx.series.add(at, n)
 }
 
 func (l *link) recordRx(peerSent int64) {
 	l.rxMu.Lock()
 	rx := l.rx
+	l.res.RxSeriesStartMs, l.res.RxSeriesMbit = rx.series.result() // late packets may still be counting
 	l.rxMu.Unlock()
 	res := &l.res
 	res.RxPackets, res.RxPeerSent = ptr(rx.packets), ptr(peerSent)
@@ -205,6 +209,48 @@ func (l *link) headerBytes() int64 {
 }
 
 const channelDataHeader = 4
+
+// series is a Data rate over time: bytes counted in fixed intervals of the
+// run's clock (time since start), so each member's series lines up with
+// the others' through start_unix_ms. Intervals start at multiples of
+// every, so the first and last are usually partly filled; one with
+// nothing in it between two that have data reads 0.
+type series struct {
+	every time.Duration // 0: off
+	first int64         // the interval bins[0] counts, in multiples of every
+	bins  []int64       // bytes
+}
+
+func (s *series) add(at time.Duration, n int) {
+	if s.every <= 0 {
+		return
+	}
+	i := int64(at / s.every)
+	switch {
+	case s.bins == nil:
+		s.first = i
+	case i < s.first: // reader goroutines can count a little out of order
+		s.bins = append(make([]int64, s.first-i), s.bins...)
+		s.first = i
+	}
+	for int64(len(s.bins)) <= i-s.first {
+		s.bins = append(s.bins, 0)
+	}
+	s.bins[i-s.first] += int64(n)
+}
+
+// result is when the series starts, since start, and its rate in Mbit/s
+// per interval; both nil when it is off or nothing was counted.
+func (s *series) result() (*float64, []float64) {
+	if s.bins == nil {
+		return nil, nil
+	}
+	mbit := make([]float64, len(s.bins))
+	for i, b := range s.bins {
+		mbit[i] = math.Round(float64(b)*8/s.every.Seconds()/1e3) / 1e3 // to the kbit/s
+	}
+	return ptr(ms(time.Duration(s.first) * s.every)), mbit
+}
 
 func percentile(sorted []float64, p float64) float64 {
 	k := float64(len(sorted)-1) * p / 100
