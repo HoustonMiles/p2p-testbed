@@ -22,7 +22,7 @@ import (
 // before switching; until then the caller skips hopping for them.
 //
 // TODO(paper §5 Threat Model, countermeasures): slots have a fixed length,
-// so hop timing is regular and an adaptive attacker can learn it. Derive a
+// so hop timing is regular and a reactive attacker can learn it. Derive a
 // per-slot offset from the hop key ("randomized hop timing").
 type Schedule struct {
 	Key      []byte

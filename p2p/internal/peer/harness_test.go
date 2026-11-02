@@ -2,6 +2,7 @@ package peer
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -150,7 +151,10 @@ func peerConfig(name string, i int, extra Config) Config {
 		PunchTimeout: 5 * time.Second, PunchInterval: 20 * time.Millisecond, StepTimeout: 5 * time.Second,
 		Pings: 20, PingInterval: 5 * time.Millisecond, PingGrace: 200 * time.Millisecond,
 		RateMbit: 5, Duration: 300 * time.Millisecond, Size: 1000, Drain: 200 * time.Millisecond,
-		Linger: 100 * time.Millisecond,
+		SampleInterval: 50 * time.Millisecond, Linger: 100 * time.Millisecond,
+	}
+	if extra.SampleInterval != 0 { // negative: off
+		c.SampleInterval = max(extra.SampleInterval, 0)
 	}
 	if extra.Direct != nil {
 		d := *extra.Direct // each peer gets its own copy to adjust
@@ -235,6 +239,28 @@ func checkRow(t *testing.T, name string, r *Result) {
 	}
 	if r.RxMbit == nil || *r.RxMbit < 3 || *r.RxMbit > 7 {
 		t.Errorf("%s: rx rate %s, want about 5 Mbit/s", name, show(r.RxMbit))
+	}
+	checkSeries(t, name+" tx", r.SeriesMs, r.TxSeriesStartMs, r.TxSeriesMbit, r.TxPackets, r.PacketBytes, nil)
+	checkSeries(t, name+" rx", r.SeriesMs, r.RxSeriesStartMs, r.RxSeriesMbit, r.RxPackets, r.PacketBytes, r.RxStartMs)
+}
+
+// checkSeries checks a rate over time against its totals: it adds up to
+// every byte counted, and its first interval holds the first packet.
+func checkSeries(t *testing.T, name string, every, start *float64, mbit []float64, packets *int64, size int, first *float64) {
+	t.Helper()
+	if every == nil || start == nil || len(mbit) == 0 || packets == nil {
+		t.Errorf("%s: no series (every %s, start %s, %d intervals)", name, show(every), show(start), len(mbit))
+		return
+	}
+	bytes := 0.0
+	for _, v := range mbit {
+		bytes += v * 1e6 / 8 * *every / 1000
+	}
+	if want := float64(*packets) * float64(size); math.Abs(bytes-want) > 0.01*want {
+		t.Errorf("%s: series adds up to %.0f bytes, want %.0f", name, bytes, want)
+	}
+	if first != nil && (*first < *start || *first >= *start+*every) {
+		t.Errorf("%s: first packet at %.1f ms is not in the first interval (%.1f ms)", name, *first, *start)
 	}
 }
 

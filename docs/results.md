@@ -28,6 +28,7 @@
 | Mesh step 4c: peers join a running mesh (each link starts when its member is introduced); `stagger_ms` spaces the starts; join time per peer (`join_ms_*`); `[params]` keys as matrix keys; `mesh_join` experiment | done, tests pass; in a 4-CPU VM without netem (2 runs per configuration): every pair as predicted at every spacing; median join time at 16 peers 317 ms all at once, 169 ms at 500 ms spacing or more (8 peers: about 160 ms at any spacing) | `p2p/internal/peer/meet.go`, `p2prunner/mesh.py`, `p2prunner/experiment.py` |
 | Relay step 5a: TURN relay in the testbed (coturn at 198.18.0.102, long-term credentials, optional `RELAY_DELAY_MS`); Go TURN client (allocate, permissions, channels, ChannelData; no new dependencies) on a STUN message layer with MESSAGE-INTEGRITY; relay in `smoke`; NAT checks retry a peer that got no reply | done, tests pass; MESSAGE-INTEGRITY checked against the RFC 5769 sample; relay-to-relay through coturn from the host and from behind a port-restricted NAT | `p2p/internal/turn/`, `p2p/internal/stun/message.go`, `testbed/stun/` |
 | Relay step 5b: `punch -relay` (every link through the TURN relay, with Noise sealing everything after the handshake under `-direct`); the rendezvous carries relayed addresses and introduces relayed members by them alone; `relay` outcome in mesh trials; `smoke`/`verify` refuse a mix of two stacks; `run` says which configuration is left running | done, tests pass (fake TURN relay in the loopback tests; the relay sees no readable Data under `-direct`, mutation-checked); real coturn: two symmetric NATs, which cannot punch, connected with 20/20 pings and 20 Mbit/s; 8 peers of every NAT type: 28/28 pairs through the relay against 15/28 hop-connected | `p2p/internal/peer/relay.go`, `p2p/internal/wire`, `p2p/internal/rendezvous` |
+| Goodput over time: the throughput test records the rate every `-sample-interval` (50 ms) on both ends, what was sent (`tx_series_*`) and what arrived (`rx_series_*`); `p2prunner/goodput.py` puts each series on the Unix clock and computes goodput before, during and after an attack window and the recovery time | done, tests pass (Go: the series add up to the run's totals and start with its first packet, mutation-checked; Python: dip, recovery, no recovery) | `p2p/internal/peer/measure.go`, `p2prunner/goodput.py` |
 | Relay step 5c: `relay_matrix` (every NAT pairing through the relay; a 2-peer mesh trial), `relay_path` (direct_path's configurations through the relay: Experiment B's third arm), `relay_detour` (relay 0 / 10 / 40 ms away); `compare` counts relayed trials and lines up configurations that differ in one setting (`--ignore`) | done, tests pass; `relay_matrix` once per configuration in a VM without netem: 32/32 pairings connected through the relay, including the 8 that cannot punch | `experiments/relay_*.toml`, `p2prunner/reports.py` |
 | Result reports (standard library only) | done | `p2prunner hops`, `p2prunner compare` (`p2prunner/reports.py`) |
 | Tests: Go unit + fuzz tests beside the code, Python `unittest` in `tests/` | done | [testing.md](testing.md) |
@@ -39,15 +40,15 @@
 | **Result:** mesh join | 80/80 trials; every pair as RFC 4787 predicts at every size and spacing; join time about 425 ms in every configuration (about six coast round trips), so neither load nor start pattern matters up to 16 peers | `results/mesh_join/20261020-111009` |
 | **Result:** relay baseline | 380/380 trials; the relay adds 0.56 ms RTT on the path and exactly 2 x its detour off it; goodput matches header overhead exactly; it connects all 32 NAT configurations | `results/relay_path/20261020-141454`, `results/relay_detour/20261020-142341`, `results/relay_matrix/20261020-143233` |
 | **Result:** Experiment B, performance cost | 30/30 trials; no latency cost, -2.0% goodput (= Noise overhead), no loss from hopping | `results/direct_path/` (latest run, drain-based close) |
+| **Result:** Experiment C, flooding | Three regimes, each with its own defence (see the Experiment C section below). **Volumetric:** port-hopping does not defend goodput -- the access link is the bottleneck and the rate cap sits before the NAT, so the flood congests the downlink whatever port it hits; hopping and a fixed port lose the same (~10% at 0.5x, ~16% at 1x the link), and only the relay defends goodput, by hiding the address. **Off-path injection:** a restricted NAT drops the attacker at the border (wrong source), so injection is blocked regardless of hopping -- the `attack_react` run reaches a live socket zero times everywhere, which is the NAT filtering, not hopping. **Targeted injection** (`attack_inject_lan`): against an oracle told the victim's port but reacting after a delay, hopping cuts the hit-rate on the live socket from 100% at delay 0 to 86 / 61 / 12 / 0% at 0.25 / 0.5 / 1 / 2 hop intervals, while a fixed port stays at 100% throughout; goodput is ~19.9 Mbit/s in every case, so this is precision, not bandwidth. This is the one regime where hopping, not the relay, is the defence | `results/attack_volume/`, `results/attack_react/`, `results/attack_inject_lan/` |
 
 ## Not done
 
 | Part | What it is for |
 |---|---|
 | Full mesh, next: per-peer clock offsets in mesh trials, port clashes between a peer's links, a long-running mesh (members leaving and rejoining) | The paper's system is a mesh of pairwise direct links |
-| Goodput over time: sample goodput every ~100 ms instead of one total per run | Experiment C's goodput under attack and recovery time depend on it |
-| Attack harness: flood containers (.200+) and the three attacker tiers (static, scripted reactive, AI-driven adaptive), all outside attackers | DoS experiments |
-| Experiment C | Attack resilience, direct hopping vs relay (`hop_drain_cutoffs`, `hop_unrouted`, `hop_foreign`, `hop_auth_failed` are there for it) |
+| Attack harness is built and tested: the volumetric attacker (`experiments/attack_volume.toml`), the off-path reactive attacker (`experiments/attack_react.toml`), and the co-resident targeted attacker (`experiments/attack_inject_lan.toml`, the LAN harness; peer `-hop-schedule-out` + `flood -schedule`, attacker on the victim's LAN), and the relayed arm that floods the relay (`experiments/attack_relay.toml`). The AI-driven attacker is out of scope (advisor) | DoS experiments |
+| Experiment C is measured across all three flooding regimes: volumetric (direct vs relay, hidden vs exposed), off-path injection, and targeted injection -- see the Experiment C section. No experiment work remains; relay placement/robustness sweeps are optional | Attack resilience |
 | Rendezvous hardening: a room-admission token in Register (members are those that share it) and a per-source registration rate limit, plus an address-harvesting experiment | Today anyone who knows a room number learns its members' addresses; an outside attacker should not be able to find peers to flood |
 | Relay placement sweep (`relay_detour` over more detours and distances) | The relay's latency cost is its detour; one curve shows how it depends on placement |
 | Port-changing CGN (a CGN mode that rewrites source ports) | The testbed's CGNs keep ports, so CGNAT never breaks hopping here; many real CGNs would (threat to validity) |
@@ -154,6 +155,94 @@ The overlap must cover queueing delay, not just the RTT.
 Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
 `results/direct_path_overlap/20261012-140631`.
 
+## Experiment C: attack resilience
+
+Flooding a peer splits into three regimes by what the attacker is trying to do
+and where the defence has to sit.
+
+**Volumetric (fill the link).** `attack_volume`: the attacker floods the
+victim's public address at a multiple of its downlink. Goodput falls the same
+whether the victim hops or sits on a fixed port (~10% at 0.5x, ~16% at 1x), and
+the hopping and plain-port lines overlap. The access link is the bottleneck and
+the rate cap is applied *before* the NAT, so the flood congests the downlink no
+matter which port it names -- the port is downstream of the chokepoint. Only the
+relay defends goodput, and only by hiding the address: `attack_relay` floods a
+relayed peer three ways. When the victim's address is hidden, the attacker can
+reach only the relay (`198.18.0.102`); coturn drops the junk on the uncapped WAN
+and the victim keeps its full goodput (39.8 Mbit/s at both 1x and 2x, 0.2-0.3%
+loss -- the no-attack baseline). When the attacker instead knows the victim's
+address and floods it, goodput collapses just as in the direct arm (31-33 Mbit/s,
+14-18% loss at 1x/2x) whether or not the session is relayed -- the relay helps
+only while the address stays secret, which is why the rendezvous must not hand it
+out. Runs: `results/attack_volume/`, `results/attack_relay/`.
+
+**Off-path injection (reach the socket from the outside).** `attack_react`,
+both peers port-restricted: the attacker reaches a live socket zero times in
+every configuration and at every reaction delay. That is the NAT doing its job,
+not port-hopping: a port-restricted NAT only admits inbound from the exact
+(address, port) the inside host last sent to, and the attacker is a different
+source, so its packets are dropped at the border before any port question
+arises. Application-layer auth (Noise) plus NAT filtering already close this
+regime; hopping adds nothing to it, and nothing is needed.
+
+**Targeted injection (land on the live port).** `attack_inject_lan`: to measure
+port-hopping's precision on its own we give the attacker the strongest possible
+delivery -- it is co-resident on the victim's LAN (`10.200.a.200`) and floods the
+host directly (`10.200.a.10`), with no NAT in the path. It is an oracle, told the
+victim's receive-port schedule, but can only re-aim after a reaction delay of
+`react_delay_x` hop intervals (an upper bound on any real attacker; an off-path
+one cannot even learn the port). Hopping arm vs a fixed-port (`raw`) arm,
+port-restricted pairing, 0.5x link flood, 3 trials each:
+
+| reaction delay (hop intervals) | hopping hit-rate | fixed-port hit-rate | goodput (Mbit/s) |
+|---|---|---|---|
+| 0.00 | 1.00 | 1.00 | 19.9 |
+| 0.25 | 0.86 | 1.00 | 19.9 |
+| 0.50 | 0.61 | 1.00 | 19.9 |
+| 1.00 | 0.12 | 1.00 | 19.9 |
+| 2.00 | 0.00 | 1.00 | 19.9 |
+
+hit-rate = attacker packets that reached the victim's live receive socket
+(`p2prunner hits`: the hopping arm's `hop_unrouted`/`hop_foreign`/
+`hop_auth_failed`, the raw arm's `rx_stray`) over packets sent. Port-hopping
+drives the oracle's hit-rate from 100% to 0% as its reaction delay crosses one
+hop interval, matching the model `loss ~ max(0, 1 - delay)`; a fixed port stays
+pinned at 100% because it never moves. Goodput is ~19.9 Mbit/s throughout, so
+this is a precision effect, not bandwidth (the LAN is uncapped). The ~12%
+residual at one interval is the drain overlap: the old socket stays open about
+112 ms past each hop (`hop_drain_ms_avg`), so an attacker just under one interval
+late still catches a sliver. **This is the one regime where port-hopping, not
+the relay, is the defence**, and it is the capability that offsets the
+volumetric result. Run: `results/attack_inject_lan/`.
+
+Figure: `uv run --group analysis python analysis/meeting_figures.py` writes
+`analysis/figures/fig_attack_inject.png` (both arms vs reaction delay, with the
+model overlaid).
+
+**Measurement notes / limitations.**
+
+- *Why the LAN harness.* We first tried to deliver the targeted flood over the
+  WAN against a full-cone victim. A real full-cone NAT forwards unsolicited
+  packets to a mapped port, but our Linux conntrack-based emulation drops them
+  once the victim is actively using that port (the inbound DNAT would collide
+  with the victim's own outbound SNAT mapping on the same port), so the flood
+  never reached the live socket under load. That is an emulation limitation, not
+  a hopping result, and it confounds the port question with NAT behaviour. The
+  LAN position removes the NAT from the path so the only variable left is whether
+  moving the port defeats a reactive attacker. The LAN attacker is a measurement
+  harness (strongest-possible delivery), not a claim that co-resident attackers
+  are the common threat -- the realistic off-path attacker is the regime above,
+  which NAT filtering already handles.
+- *Threat-model scope.* The result bounds a *reactive* attacker: one that learns
+  the port and re-aims after a delay. It does not defend against a real-time
+  on-path observer that reads each packet's port off the wire and follows within
+  one packet; hopping cannot outrun that, and the schedule is secret only from
+  off-path attackers (see the threat-model TODOs in `internal/direct`).
+- *Scheduling correctness.* The attacker replays the victim's port schedule from
+  a shared volume. The schedule is cleared before each trial and written
+  atomically, so a trial cannot replay a previous trial's (stale) ports -- an
+  earlier version did, which made every trial miss and read as a null result.
+
 ## Paper updates pending
 
 - Scope: the system is a full mesh of pairwise direct links, each with its
@@ -228,5 +317,3 @@ Runs: fixed overlap `results/direct_path/20261012-134117`, 400 ms overlap
   slow joins, 317 against 169 ms without netem: load matters only when CPU
   runs out.) Time to full mesh, all at once: 0.47 s for 8 peers, 0.63 s for
   16.
-- Find and verify a citation on AI-driven attacks against moving-target
-  defenses.

@@ -26,7 +26,7 @@ STUN_IP = "198.18.0.100"
 STUN_ALT_IP = "198.18.0.103"         # RFC 5780 needs a second address
 RENDEZVOUS_IP = "198.18.0.101"
 RELAY_IP = "198.18.0.102"            # reserved for the TURN relay
-# 198.18.0.200 and up: reserved for attackers.
+ATTACKER_IP = "198.18.0.200"         # the static attacker (Experiment C); 198.18.0.200+ reserved for attackers
 
 LAN_PREFIX = "10.200"                # 10.200.k.0/24: rarely used by real networks
 # Real carrier networks use 100.64.0.0/10 (RFC 6598), but so does Tailscale,
@@ -83,6 +83,13 @@ class Peer:
         return f"{LAN_PREFIX}.{self.number}.10"
 
     @property
+    def lan_attacker_ip(self) -> str:
+        """An attacker co-resident on this peer's LAN (Experiment C, targeted
+        injection): it reaches the host directly, with no NAT in the path, so
+        the measurement isolates the port from NAT delivery."""
+        return f"{LAN_PREFIX}.{self.number}.200"
+
+    @property
     def carrier_subnet(self) -> str:
         return f"{CARRIER_PREFIX}.{self.number}.0/24"
 
@@ -112,11 +119,11 @@ class Peer:
         return self.cgn_wan_ip if behind_cgn else self.wan_ip
 
 
-def wan_neighbours(n: int, cgn_count: int) -> int:
+def wan_neighbours(n: int, cgn_count: int, attacker: bool = False) -> int:
     """ARP entries the WAN can need: every host on it (each peer's router or
-    CGN, and the three services) may talk to every other. The kernel counts
-    them for all containers together."""
-    hosts = n + cgn_count + 3
+    CGN, the three services, and the attacker if present) may talk to every
+    other. The kernel counts them for all containers together."""
+    hosts = n + cgn_count + 3 + (1 if attacker else 0)
     return hosts * (hosts - 1)
 
 

@@ -138,6 +138,8 @@ class Config:
     bundles: dict[str, str]        # bundle key -> bundle name, e.g. {"pairing": "realistic"}
     varied: tuple = ()             # plain (non-bundle) matrix keys, shown in the label
     params: dict = field(default_factory=dict)  # [params] the matrix sets for this configuration
+    attacker: bool = False         # bring up the attacker container (flood trials)
+    lan_attacker: str | None = None  # also place the attacker on this peer's LAN (attack=inject)
 
     @property
     def peers(self) -> list[topology.Peer]:
@@ -221,6 +223,14 @@ def load(path: str | Path) -> Experiment:
         source_text=text,
     )
     exp.configs = expand_matrix(data.get("matrix", {}), exp.params)
+    if exp.trial == "flood":
+        for cfg in exp.configs:
+            cfg.attacker = True
+            # attack=inject delivers the flood on the victim's LAN (no NAT in
+            # the path), so the attacker must be co-resident there.
+            merged = {**exp.params, **cfg.params}
+            if str(merged.get("attack", "")) == "inject":
+                cfg.lan_attacker = str(merged.get("victim", "a"))
     return exp
 
 

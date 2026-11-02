@@ -16,8 +16,20 @@ All run with plain python3 as well: standard library only.
 
 from __future__ import annotations
 
-from p2prunner.results import (both, by_config, config_key, fmt, label, load_run, load_runs, median, number,
-                               print_table, share, side_values)
+from p2prunner.results import (
+    both,
+    by_config,
+    config_key,
+    fmt,
+    label,
+    load_run,
+    load_runs,
+    median,
+    number,
+    print_table,
+    share,
+    side_values,
+)
 
 # =============================================================================
 # hops
@@ -196,3 +208,107 @@ def mesh_row(trials: list[dict]) -> list[str]:
 def column(trials: list[dict], name: str) -> list[float]:
     """The numbers in one column of the trials, skipping the missing."""
     return [v for r in trials if (v := number(r, name)) is not None]
+
+
+# =============================================================================
+# attack
+# =============================================================================
+ATTACK_HEADER = ["config", "n", "mult", "mbit", "delay", "before", "during", "min", "after", "rx_mbit", "rx_loss"]
+
+
+def attack(paths: list[str]) -> int:
+    """Experiment C (volumetric): the victim's goodput as the flood grows.
+
+    Per configuration (an arm x a flood multiple): the median over trials of
+    the victim's goodput before / during / after the attack, its lowest
+    during, and its overall receive rate and loss. Compare a multiple of 0
+    (the control) with 1x and 2x, and the plain arm with hopping: a flood
+    that fills the link should sink both, because port-hopping cannot escape
+    a volumetric flood."""
+    groups = by_config(load_runs(paths))
+    table = sorted((attack_row(trials) for trials in groups.values()), key=lambda r: r[0])
+    print_table(ATTACK_HEADER, table)
+    print("\nbefore/during/after/min are the victim's goodput (Mbit/s) over the attack window;")
+    print("rx_mbit/rx_loss are its whole-run receive rate and loss. mult is x the downlink,")
+    print("delay is the reactive attacker's reaction, in hop intervals ('-' for volumetric).")
+    print_errors([r for trials in groups.values() for r in trials if not r.get("ok")])
+    return 0
+
+
+def attack_row(trials: list[dict]) -> list[str]:
+    def med(col: str) -> str:
+        return fmt(median([v for r in trials if (v := number(r, col)) is not None]))
+    first = trials[0]
+    arm = first.get("arm") or first.get("direct_mode", "")
+    # The relayed arms share a mode string; the one flooding the relay (the
+    # victim's address hidden) is marked so it is not confused with the one
+    # flooding the victim's own address (the relay's limit).
+    suffix = " [floods the relay]" if first.get("attack_target") == "relay" else ""
+    delay = fmt(number(first, "react_delay_x")) if "react_delay_x" in first else "-"
+    return [
+        f"{arm} {label(first)}{suffix}".strip(), str(len(trials)),
+        fmt(number(first, "flood_multiple")), med("flood_mbit"), delay,
+        med("gp_goodput_before_mbit"), med("gp_goodput_during_mbit"),
+        med("gp_goodput_min_mbit"), med("gp_goodput_after_mbit"),
+        med("a_rx_mbit"), med("a_rx_loss"),
+    ]
+
+
+# =============================================================================
+# hits (reactive attack: how often the attacker reached a live hop socket)
+# =============================================================================
+HITS_HEADER = ["config", "n", "delay", "mult", "flood_pkts", "reached", "hit_rate", "during"]
+
+
+def hits(paths: list[str]) -> int:
+    """Experiment C (reactive): how well port-hopping keeps the attacker off
+    the victim's live socket, which goodput (link-bound) cannot show.
+
+    The victim counts attacker packets that reached its live receive socket.
+    In the hopping arm that is three hop counters: hop_unrouted (no matching
+    receiver index), hop_foreign (wrong source IP), and hop_auth_failed (right
+    source IP but junk that fails the AEAD check). In the raw arm (one fixed
+    port, no hopper) the same packets land on the plain socket and are counted
+    as rx_stray. reached = their sum; hit_rate = reached / the attacker's
+    packets. If port-hopping keeps the attacker off the live socket, the
+    hopping arm's reached falls toward zero as the reaction delay passes one
+    hop interval, while the raw arm stays near 1 (its port never moves) --
+    even though goodput (during) barely moves either way (the link, not the
+    socket, is the bottleneck). reached near zero at every delay for BOTH arms
+    means the attacker never reached the socket at all (e.g. a NAT dropped the
+    flood before it arrived)."""
+    groups = by_config(load_runs(paths))
+    rows = [hits_row(trials) for trials in groups.values() if has_hopper(trials[0])]
+    print_table(HITS_HEADER, sorted(rows, key=lambda r: r[0]))
+    print("\nreached = attacker packets that hit the victim's live receive socket")
+    print("(hopping arm: hop_unrouted + hop_foreign + hop_auth_failed; raw arm:")
+    print("rx_stray); hit_rate = reached / the attacker's packets; during = goodput")
+    print("under attack (Mbit/s).")
+    return 0
+
+
+HIT_COLS = ("a_hop_unrouted", "a_hop_foreign", "a_hop_auth_failed", "a_rx_stray")
+
+
+def has_hopper(row: dict) -> bool:
+    return any(number(row, c) is not None for c in HIT_COLS)
+
+
+def hits_row(trials: list[dict]) -> list[str]:
+    def med(col: str) -> str:
+        return fmt(median([v for r in trials if (v := number(r, col)) is not None]))
+
+    def reached(r: dict) -> float | None:
+        vals = [number(r, c) for c in HIT_COLS]
+        return None if all(v is None for v in vals) else sum(v or 0 for v in vals)
+
+    reached_vals = [v for r in trials if (v := reached(r)) is not None]
+    rates = [v / p for r in trials if (v := reached(r)) is not None and (p := number(r, "flood_packets"))]
+    first = trials[0]
+    arm = first.get("arm") or first.get("direct_mode", "")
+    return [
+        f"{arm} {label(first)}".strip(), str(len(trials)),
+        fmt(number(first, "react_delay_x")), fmt(number(first, "flood_multiple")),
+        med("flood_packets"), fmt(median(reached_vals)), fmt(median(rates)),
+        med("gp_goodput_during_mbit"),
+    ]

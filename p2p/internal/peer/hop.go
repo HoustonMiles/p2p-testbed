@@ -27,6 +27,9 @@ func (l *link) startDirect() bool {
 		return false
 	}
 	l.res.HopConnected = true
+	if l.r.cfg.HopScheduleOut != "" {
+		l.r.writeScheduleOut(l.hopScheduleLines(l.r.scheduleHorizon()))
+	}
 	return true
 }
 

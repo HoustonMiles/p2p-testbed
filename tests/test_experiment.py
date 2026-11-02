@@ -115,6 +115,14 @@ class LoadTest(unittest.TestCase):
             with self.subTest(path.name):
                 self.assertTrue(experiment.load(path).configs)
 
+    def test_flood_sets_attacker_and_inject_sets_lan_attacker(self):
+        root = Path(__file__).resolve().parent.parent
+        react = experiment.load(root / "experiments/attack_react.toml")
+        self.assertTrue(all(c.attacker for c in react.configs))
+        self.assertTrue(all(c.lan_attacker is None for c in react.configs))  # WAN delivery
+        inject = experiment.load(root / "experiments/attack_inject_lan.toml")
+        self.assertTrue(all(c.attacker and c.lan_attacker == "a" for c in inject.configs))
+
 
 if __name__ == "__main__":
     unittest.main()

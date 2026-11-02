@@ -34,6 +34,7 @@ type PeerResult struct {
 
 	RateMbit      float64  `json:"rate_mbit"`
 	PacketBytes   int      `json:"packet_bytes"`
+	SeriesMs      *float64 `json:"series_ms"` // the interval of tx_series_mbit and rx_series_mbit; null: off
 	Direct        bool     `json:"direct"`
 	Noise         string   `json:"noise"`
 	PeerKeyFrom   string   `json:"peer_key_from"`
@@ -47,6 +48,11 @@ type PeerResult struct {
 
 	StartUnixMs float64 `json:"start_unix_ms"` // when the run began: puts every member's *_ms on one timeline
 	TotalMs     float64 `json:"total_ms"`
+
+	// Packets on the punched socket that named no member of our room: stray or
+	// injected. In raw/relay mode (no hopper) this is where a targeted flood
+	// lands, so it is the plain-socket counterpart of hop_unrouted.
+	StrayPackets uint64 `json:"rx_stray"`
 }
 
 // LinkResult is what this peer measured on one link.
@@ -88,6 +94,14 @@ type LinkResult struct {
 	RxIPMbit   *float64 `json:"rx_ip_mbit"`  // the same, counting IP, UDP and Noise headers
 	RxStartMs  *float64 `json:"rx_start_ms"` // first and last Data packet, since start: when the test ran
 	RxEndMs    *float64 `json:"rx_end_ms"`
+
+	// The same rates over time: one value per series_ms interval, the first
+	// starting at *_series_start_ms since start (tx: what we sent, rx: what
+	// arrived, counting UDP payload as tx_mbit and rx_mbit do).
+	TxSeriesStartMs *float64  `json:"tx_series_start_ms"`
+	TxSeriesMbit    []float64 `json:"tx_series_mbit"`
+	RxSeriesStartMs *float64  `json:"rx_series_start_ms"`
+	RxSeriesMbit    []float64 `json:"rx_series_mbit"`
 
 	Initiator     *bool    `json:"initiator"` // this side started the handshake (the lower static key)
 	HandshakeMs   *float64 `json:"handshake_ms"`

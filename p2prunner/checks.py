@@ -16,10 +16,10 @@ import re
 import subprocess
 
 from p2prunner import topology
-from p2prunner.topology import RELAY_IP
 from p2prunner.experiment import Config, resolve
-from p2prunner.testbed import Testbed, TestbedError
 from p2prunner.nat import expected_behaviour
+from p2prunner.testbed import Testbed, TestbedError
+from p2prunner.topology import RELAY_IP
 from p2prunner.trials import STUN_IP, measure_all
 
 TYPES = ("full_cone", "restricted", "port_restricted", "symmetric")

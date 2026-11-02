@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -23,9 +24,15 @@ net_profile = ["local", "coast"]
 
 
 class FakeTestbed:
-    def __init__(self, fail_up=False):
+    def __init__(self, fail_up=False, fail_build=False):
         self.fail_up = fail_up
+        self.fail_build = fail_build
         self.started = []
+        self.builds = 0
+
+    def build(self, timeout=600):
+        self.builds += 1
+        return types.SimpleNamespace(returncode=1 if self.fail_build else 0, stderr="boom")
 
     def versions(self):
         return {"git_dirty": False}
@@ -83,6 +90,21 @@ class RunTest(unittest.TestCase):
         self.assertTrue(all(r["ok"] for r in rows))
         self.assertTrue((self.run_dir() / "trials.csv").exists())
         self.assertEqual(json.loads((self.run_dir() / "meta.json").read_text())["runs"], 4)
+
+    def test_rebuilds_images_before_running(self):
+        tb = FakeTestbed()
+        self.assertEqual(self.run_cli(tb, self.counting_trial()), 0)
+        self.assertEqual(tb.builds, 1)   # one rebuild, before the stack starts
+
+    def test_no_build_skips_the_rebuild(self):
+        tb = FakeTestbed()
+        self.assertEqual(self.run_cli(tb, self.counting_trial(), "--no-build"), 0)
+        self.assertEqual(tb.builds, 0)   # opted out, still runs
+
+    def test_build_failure_aborts_before_any_trial(self):
+        tb = FakeTestbed(fail_build=True)
+        self.assertEqual(self.run_cli(tb, self.counting_trial()), 1)
+        self.assertEqual(self.calls, 0)  # nothing ran against a stale image
 
     def test_interrupt_then_resume(self):
         code = self.run_cli(FakeTestbed(), self.counting_trial(interrupt_at=4))

@@ -10,6 +10,8 @@ code (`_test.go`). Dependencies only point down this list.
 p2p/
   cmd/punch/          the peer program: flags -> peer.Run -> one JSON line per link
   cmd/rendezvous/     the rendezvous program
+  cmd/flood/          the static attacker (Experiment C): fixed rate to a fixed
+                      address and port for a window; prints the attack window
   internal/
     peer/             one peer's run, with one link per member: peer.go (the steps),
                       socket.go (the one socket, dispatch to links), meet.go (STUN, rendezvous),
@@ -32,8 +34,32 @@ they build packets and interpret replies, and `peer` carries them, because
 every step before hopping must use the one socket whose NAT mapping the
 rendezvous saw.
 
-Both programs are compiled into the peer image
+All three programs are compiled into the peer image
 (`testbed/host/Dockerfile` runs `go vet` and `go test` during the build).
+
+## Static attacker (Experiment C)
+
+`cmd/flood` is the first of the two attacker tiers: a traffic generator
+that sends UDP packets at a fixed rate (`-mbit`) to one fixed address and
+port (`-target`) for a window (`-at` to start, `-duration` to run), and
+never adapts. It follows no hops, reads no replies and learns nothing
+about its target. The scripted reactive tier is the same `flood` binary
+in `-schedule` mode: an oracle told the victim's port schedule that re-aims
+after a reaction delay (`-react-delay`), fed by the peer's `-hop-schedule-out`. It prints one JSON line when it finishes:
+`target`, `start_unix_ms`, `end_unix_ms`, `packets`, `bytes`, `mbit`, so
+the runner can mark the attack window on the peers' `rx_series_mbit`
+(start_unix_ms puts them on one clock).
+
+The attacker runs in its own container (`attacker`, 198.18.0.200), added to
+the testbed with `--attacker` (`up`/`compose`) or an experiment that asks
+for it. It sits on the WAN and reaches a peer like any other internet host,
+so a peer's NAT filters it exactly as it would a real outsider: a
+port-restricted NAT drops its packets unless the peer is reachable on that
+port, so at a low rate it mainly tests injection past the NAT, while at a
+rate that fills the access link it congests the link whatever the port
+(the volumetric case only the relay escapes, because the relay hides the
+peer's address). Which effect a trial measures is set by its `-mbit` as a
+multiple of the peer's access-link speed.
 
 ## Raw UDP hole-punching baseline
 
@@ -213,6 +239,21 @@ and in direct mode the handshake done), the ping and throughput measurements
 (`rtt_ms_*`, `tx_*`, `rx_*`), and `rx_start_ms` / `rx_end_ms` (when the
 link's Data arrived, since start: the test's place in the run). Before mesh
 step 2, `name` and `room` were `role` and `session`.
+
+The throughput test also records its rate over time, in intervals of
+`-sample-interval` (default 50 ms; 0 turns it off): `series_ms` (the
+interval, a peer column), and per link `tx_series_mbit` (what we sent) and
+`rx_series_mbit` (what arrived), each a list of Mbit/s per interval, with
+`tx_series_start_ms` / `rx_series_start_ms` when the first interval starts,
+since start. Intervals are fixed steps of the peer's own clock, so with
+`start_unix_ms` every series lines up with the other end's and with an
+attack's timing; the first and last are usually partly filled, and an
+interval with nothing in it between two with data reads 0. The rx series
+ends with the last packet that arrived, so a link that never recovers
+shows as a series that stops early: compare it with the sender's tx series.
+`p2prunner/goodput.py` turns these into goodput before, during and after
+an attack and the recovery time (back to 90% of the rate before, for three
+intervals in a row).
 
 Relayed mode adds `relayed`, `relay_addr` (our relayed address),
 `relay_ms` (start to the allocation), `peer_relay_addr` and

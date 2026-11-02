@@ -58,6 +58,7 @@ func newLink(r *runner, in wire.Intro, at time.Duration) *link {
 	l := &link{r: r, peerID: in.PeerID, rdvAddr: in.Peer, remote: in.Peer,
 		rdvKey: append([]byte(nil), in.Key...), rtts: map[uint64]float64{}, barrierState: newBarrierState(),
 		in: make(chan inbound, 1024), pinged: make(chan struct{}, 1), turn: make(chan struct{}, 1), tested: make(chan struct{}, 1)}
+	l.rx.series.every = r.cfg.SampleInterval
 	l.res.PeerID = idString(in.PeerID)
 	l.res.RendezvousMs = ptr(ms(at))
 	l.res.PeerRdvAddr = ptr(in.Peer.String())

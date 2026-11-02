@@ -40,6 +40,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"p2ptestbed/p2p/internal/direct"
@@ -73,6 +74,10 @@ type Config struct {
 	Duration time.Duration // per direction
 	Size     int           // UDP payload bytes per Data packet
 	Drain    time.Duration // wait for queued packets after each direction
+
+	SampleInterval time.Duration // throughput rate over time in intervals this long; 0: off
+
+	HopScheduleOut string // write the receive-port schedule here for the reactive attacker (testbed); "" off
 
 	Linger time.Duration // keep answering the members this long before exiting
 
@@ -128,6 +133,8 @@ type runner struct {
 	id   uint64
 	res  PeerResult
 
+	stray atomic.Uint64 // packets on the punched socket that named no member: stray or injected (raw/relay mode's hop_unrouted)
+
 	stunTx  stun.TxID
 	stunGot netip.AddrPort
 	rdv     *rendezvous.Client
@@ -149,6 +156,7 @@ func Run(cfg Config) ([]*Result, error) {
 	r := newRunner(cfg)
 	err := r.run()
 	r.res.TotalMs = ms(time.Since(r.t0))
+	r.res.StrayPackets = r.stray.Load()
 	return r.rows(err), err
 }
 
@@ -170,6 +178,9 @@ func newRunner(cfg Config) *runner {
 	}
 	r.res = PeerResult{Name: cfg.Name, Room: cfg.Room, ID: idString(r.id), RateMbit: cfg.RateMbit, PacketBytes: cfg.Size,
 		StartUnixMs: float64(r.t0.UnixMicro()) / 1000}
+	if cfg.SampleInterval > 0 {
+		r.res.SeriesMs = ptr(ms(cfg.SampleInterval))
+	}
 	r.res.Relayed = cfg.Relay != nil
 	if d := cfg.Direct; d != nil {
 		r.res.Direct, r.res.Noise, r.res.PeerKeyFrom = true, d.Noise, d.PeerKeyFrom
@@ -203,6 +214,9 @@ func (r *runner) run() error {
 	}
 	if err := r.meet(); err != nil {
 		return err
+	}
+	if r.cfg.Direct == nil && r.cfg.Relay == nil {
+		r.writeScheduleOut(r.rawScheduleLine())
 	}
 	r.runTests()
 	r.linger()
