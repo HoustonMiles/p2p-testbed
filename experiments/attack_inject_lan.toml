@@ -1,0 +1,68 @@
+# =============================================================================
+# Attack inject (LAN) -- Experiment C, targeted injection, port in isolation.
+#
+# The earlier WAN runs could not measure this: a real full-cone NAT forwards
+# unsolicited packets to a mapped port, but our conntrack-based emulation drops
+# them once the victim is actively using that port (a reply-tuple conflict), so
+# the flood never reached the live socket and `reached` was always 0 -- an
+# emulation artifact, not a hopping result (see docs/results.md).
+#
+# To measure port-hopping's precision on its own, we give the attacker the
+# STRONGEST possible delivery: it is co-resident on the victim's LAN
+# (10.200.a.200) and floods the host directly (10.200.a.10), with no NAT in
+# the path. It is an oracle -- told the victim's active port via the shared
+# schedule -- but can only re-aim after react_delay_x hop intervals. This upper-
+# bounds any real attacker (an off-path one cannot even learn the port; the
+# NAT-filtering result covers it). The LAN position is a measurement harness to
+# isolate the port variable, not a claim that co-resident attackers are common.
+#
+# Read with `p2prunner hits`: reached = attacker packets that hit a live hop
+# socket (hop_unrouted + hop_foreign + hop_auth_failed). Expectation: for the
+# hopping arm, reached is high at delay 0 (the oracle lands), then falls toward
+# zero as react_delay_x passes 1 (the attacker is always a hop behind and the
+# old socket has drained); the raw arm (fixed port) stays high throughout.
+#
+#   uv run python -m p2prunner run  experiments/attack_inject_lan.toml
+#   uv run python -m p2prunner hits results/attack_inject_lan/<run>
+# =============================================================================
+
+name = "attack_inject_lan"
+description = "Targeted injection from the victim's LAN (no NAT): hopping vs a fixed port over a reaction-delay sweep."
+trial = "flood"
+runs = 3
+block_size = 3
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 90
+est_trial_s = 45
+victim = "a"
+attack = "inject"
+hop_interval_ms = 1000
+flood_multiple = 0.5
+react_delay_x = 1
+flood_at = "2s"
+flood_duration = "30s"
+mode = "-direct -hop-interval 1s"
+cmd_a = "punch -name a -room $seed -quiet $mode -pings 5 -ping-interval 100ms -rate-mbit 20 -duration 20s -sample-interval 50ms"
+cmd_b = "punch -name b -room $seed -quiet $mode -pings 5 -ping-interval 100ms -rate-mbit 20 -duration 20s -sample-interval 50ms"
+
+[matrix]
+net_profile = ["coast"]
+uplink_mbit = ["50"]
+downlink_mbit = ["50"]
+react_delay_x = [0, 0.25, 0.5, 1, 2]
+
+[[matrix.arm]]
+name = "hopping"
+mode = "-direct -hop-interval 1s"
+
+[[matrix.arm]]
+name = "raw"
+mode = ""
+
+[[matrix.pairing]]
+name = "realistic"
+nat_a = "port_restricted"
+nat_b = "port_restricted"

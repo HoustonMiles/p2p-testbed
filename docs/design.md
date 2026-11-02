@@ -10,6 +10,8 @@ code (`_test.go`). Dependencies only point down this list.
 p2p/
   cmd/punch/          the peer program: flags -> peer.Run -> one JSON line per link
   cmd/rendezvous/     the rendezvous program
+  cmd/flood/          the static attacker (Experiment C): fixed rate to a fixed
+                      address and port for a window; prints the attack window
   internal/
     peer/             one peer's run, with one link per member: peer.go (the steps),
                       socket.go (the one socket, dispatch to links), meet.go (STUN, rendezvous),
@@ -32,8 +34,32 @@ they build packets and interpret replies, and `peer` carries them, because
 every step before hopping must use the one socket whose NAT mapping the
 rendezvous saw.
 
-Both programs are compiled into the peer image
+All three programs are compiled into the peer image
 (`testbed/host/Dockerfile` runs `go vet` and `go test` during the build).
+
+## Static attacker (Experiment C)
+
+`cmd/flood` is the first of the two attacker tiers: a traffic generator
+that sends UDP packets at a fixed rate (`-mbit`) to one fixed address and
+port (`-target`) for a window (`-at` to start, `-duration` to run), and
+never adapts. It follows no hops, reads no replies and learns nothing
+about its target. The scripted reactive tier is the same `flood` binary
+in `-schedule` mode: an oracle told the victim's port schedule that re-aims
+after a reaction delay (`-react-delay`), fed by the peer's `-hop-schedule-out`. It prints one JSON line when it finishes:
+`target`, `start_unix_ms`, `end_unix_ms`, `packets`, `bytes`, `mbit`, so
+the runner can mark the attack window on the peers' `rx_series_mbit`
+(start_unix_ms puts them on one clock).
+
+The attacker runs in its own container (`attacker`, 198.18.0.200), added to
+the testbed with `--attacker` (`up`/`compose`) or an experiment that asks
+for it. It sits on the WAN and reaches a peer like any other internet host,
+so a peer's NAT filters it exactly as it would a real outsider: a
+port-restricted NAT drops its packets unless the peer is reachable on that
+port, so at a low rate it mainly tests injection past the NAT, while at a
+rate that fills the access link it congests the link whatever the port
+(the volumetric case only the relay escapes, because the relay hides the
+peer's address). Which effect a trial measures is set by its `-mbit` as a
+multiple of the peer's access-link speed.
 
 ## Raw UDP hole-punching baseline
 

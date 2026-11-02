@@ -47,7 +47,7 @@ class Mode:
     relayed: bool
 
     @classmethod
-    def of(cls, args: str) -> "Mode":
+    def of(cls, args: str) -> Mode:
         flags = args.split()
         return cls(direct="-direct" in flags, relayed="-relay" in flags)
 
@@ -129,13 +129,13 @@ def pair_outcome(ends: tuple, mode: Mode) -> str:
     if any(e is None or e.get("error") for e in ends):
         return "error"
     if mode.relayed:
-        return "relay" if both(ends, "ready_ms") else "none"
-    if mode.direct and both(ends, "hop_connected"):
+        return "relay" if both_ends(ends, "ready_ms") else "none"
+    if mode.direct and both_ends(ends, "hop_connected"):
         return "hop"
-    return "punch" if both(ends, "punched") else "none"
+    return "punch" if both_ends(ends, "punched") else "none"
 
 
-def both(ends: tuple, column: str) -> bool:
+def both_ends(ends: tuple, column: str) -> bool:
     """The column is set (true, or a number) at both ends of the pair."""
     return all(e.get(column) is not None and e.get(column) is not False for e in ends)
 

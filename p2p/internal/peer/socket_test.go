@@ -33,3 +33,15 @@ func TestAccepts(t *testing.T) {
 		}
 	}
 }
+
+// A flood on the fixed (raw/relay) socket is unparseable junk that belongs to
+// no member, so deliver counts it as stray: the plain-socket counterpart of a
+// Hopper's hop_unrouted, and what the raw arm of Experiment C measures.
+func TestDeliverCountsStrayPackets(t *testing.T) {
+	r := &runner{cfg: Config{Room: 7}, links: map[uint64]*link{}}
+	r.deliver(inbound{}, []byte("FLOOD and then some junk")) // a flood packet: does not parse
+	r.deliver(inbound{}, []byte{1, 2, 3})                     // too short to parse
+	if got := r.stray.Load(); got != 2 {
+		t.Fatalf("stray = %d, want 2 (both junk packets counted)", got)
+	}
+}

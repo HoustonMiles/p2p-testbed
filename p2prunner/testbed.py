@@ -53,6 +53,15 @@ class Testbed:
         except subprocess.TimeoutExpired as e:
             raise TestbedError(f"docker compose {' '.join(args)} timed out after {timeout}s") from e
 
+    def build(self, timeout: float = 600) -> subprocess.CompletedProcess:
+        """Rebuild the testbed images from the current source. Docker caches
+        unchanged layers, so this is a fast no-op unless p2p/ or a Dockerfile
+        changed -- but it means a code edit can never silently run against a
+        stale image (the `up` path does not pass --build). The image tags are
+        the same for every peer count, so the committed compose file suffices
+        before a stack is sized."""
+        return self.compose("build", timeout=timeout)
+
     def exec(self, service: str, command: list[str], timeout: float = 60) -> subprocess.CompletedProcess:
         """Run a command inside a running container (like `docker compose exec`)."""
         return self.compose("exec", "-T", service, *command, timeout=timeout)
@@ -81,7 +90,8 @@ class Testbed:
         cfg.env sets every testbed variable explicitly, so leftovers in your
         shell or in a .env file can never change a configuration by accident.
         """
-        self.use_stack(len(cfg.peers), cfg.cgn_peers)
+        self.use_stack(len(cfg.peers), cfg.cgn_peers, getattr(cfg, "attacker", False),
+                       getattr(cfg, "lan_attacker", None))
         result = self.compose("up", "-d", "--wait", "--force-recreate", "--remove-orphans",
                               env=cfg.env, timeout=120 + 5 * len(cfg.peers))
         if result.returncode != 0:
@@ -89,12 +99,13 @@ class Testbed:
             self.compose("down", "-t", "1", "--remove-orphans", timeout=300)
             raise TestbedError("testbed failed to start:\n" + result.stderr[-2000:])
 
-    def use_stack(self, n: int, cgn: set[str]) -> None:
+    def use_stack(self, n: int, cgn: set[str], attacker: bool = False,
+                  lan_attacker: str | None = None) -> None:
         """Make the stack of peers 1..n the one compose uses. Docker cannot
         always move a running container onto a network new to it (a CGN's
         carrier network), so a running stack of another shape stops first."""
-        check_arp_limit(topology.wan_neighbours(n, len(cgn)))
-        text = compose_file.render(n, cgn)
+        check_arp_limit(topology.wan_neighbours(n, len(cgn), attacker))
+        text = compose_file.render(n, cgn, attacker, lan_attacker)
         if self.compose_path.read_text() != text:
             self.compose("down", "-t", "1", "--remove-orphans", timeout=300)
         path = self.root / GENERATED

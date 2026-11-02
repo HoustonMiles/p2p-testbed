@@ -116,7 +116,8 @@ class FullMeshTest(unittest.TestCase):
     def test_time_to_full_mesh_when_every_pair_is_usable(self):
         rows = {n: [link(n, m) for m in "abc" if m != n] for n in "abc"}
         rows["c"] = [dict(r, start_unix_ms=1500.0) for r in rows["c"]]
-        m = mesh(Peers(temp_dir(self), rows, keys=tuple("abc")), config(peers=3), {"args": "-direct"}, TrialContext(0, 1))
+        m = mesh(Peers(temp_dir(self), rows, keys=tuple("abc")), config(peers=3),
+                 {"args": "-direct"}, TrialContext(0, 1))
         self.assertEqual((m["pairs_usable"], m["pairs_as_predicted"], m["ok"]), (3, 3, True))
         self.assertEqual(m["time_to_full_mesh_ms"], 1500.0 + 200.0 - 1000.0)
 

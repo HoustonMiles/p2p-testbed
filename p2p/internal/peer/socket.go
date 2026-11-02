@@ -61,6 +61,10 @@ func (r *runner) readLoop() {
 func (r *runner) deliver(m inbound, b []byte) {
 	p, ok := wire.Parse(b)
 	if !ok || p.Room != r.cfg.Room || !r.accepts(&m, p) {
+		// Named no member of our room: stray or injected. In raw/relay mode
+		// the data socket is fixed, so this is where a flood lands; it is the
+		// plain-socket counterpart of the hopper's hop_unrouted.
+		r.stray.Add(1)
 		return
 	}
 	if p.Type == wire.Data {

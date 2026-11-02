@@ -138,6 +138,40 @@ SERVICES = f"""\
   #   198.18.0.200+ attacker containers
 """
 
+def attacker_service(lan_attacker: Peer | None = None) -> str:
+    """The attacker container. On the WAN like any other host; with
+    lan_attacker it is also placed on that peer's LAN, so a trial can flood
+    the peer's host directly (no NAT in the path) to measure port-hopping's
+    precision on its own -- see Peer.lan_attacker_ip and Experiment C."""
+    lan_net = (f"      lan_{lan_attacker.name}: {{ ipv4_address: {lan_attacker.lan_attacker_ip} }}\n"
+               if lan_attacker else "")
+    lan_note = (f"  # Also on lan_{lan_attacker.name} ({lan_attacker.lan_attacker_ip}): a co-resident\n"
+                f"  # attacker that reaches the host directly (targeted-injection arm).\n"
+                if lan_attacker else "")
+    return f"""\
+  # ---------------------------------------------------------------------------
+  # Static attacker (Experiment C)
+  # ---------------------------------------------------------------------------
+  # Idle until a trial runs `flood` in it. It sends UDP at a fixed rate to a
+  # peer's public address and port for a set window and never adapts; it
+  # reaches a peer the same way any WAN host would, so a port-restricted NAT
+  # filters it unless the peer is reachable on that port. Uses the host
+  # image, which contains the flood binary.
+{lan_note}  attacker:
+    <<: *host
+    volumes: ["sched:/sched"]
+    networks:
+      wan: {{ ipv4_address: {topology.ATTACKER_IP} }}
+{lan_net}"""
+
+# A Docker named volume shared by the victim and the attacker: the victim
+# writes its receive-port schedule there, the attacker replays it.
+SCHED_VOLUME = """\
+volumes:
+  sched:
+"""
+
+
 NETWORKS_HEADER = """\
 
 # =============================================================================
@@ -165,25 +199,39 @@ networks:
 """
 
 
-def render(n: int, cgn: set[str] = frozenset()) -> str:
-    """The compose file for peers 1..n; cgn names the peers that get a CGN."""
+def render(n: int, cgn: set[str] = frozenset(), attacker: bool = False,
+           lan_attacker: str | None = None) -> str:
+    """The compose file for peers 1..n; cgn names the peers that get a CGN.
+    With attacker, add the static attacker container (Experiment C). With
+    lan_attacker (a peer name), that attacker is also put on that peer's LAN,
+    for the targeted-injection arm that floods the host directly."""
     ps = topology.peers(n)
     unknown = set(cgn) - {p.name for p in ps}
     if unknown:
         raise ValueError(f"--cgn names peers that are not in the testbed: {sorted(unknown)}")
+    lan_peer = topology.peer(lan_attacker) if lan_attacker else None
+    if lan_peer and lan_peer.name not in {p.name for p in ps}:
+        raise ValueError(f"--lan-attacker names peer {lan_attacker!r}, not in the testbed")
+    if lan_peer and not attacker:
+        raise ValueError("lan_attacker needs the attacker container (attacker=True)")
     parts = [HEADER]
     for p in ps:
-        parts.append(peer_services(p, p.name in cgn))
+        parts.append(peer_services(p, p.name in cgn, sched=attacker))
     parts.append(SERVICES)
+    if attacker:
+        parts.append(attacker_service(lan_peer))
     parts.append(NETWORKS_HEADER)
     for p in ps:
         parts.append(peer_networks(p, p.name in cgn))
     parts.append(wan_network())
+    if attacker:
+        parts.append(SCHED_VOLUME)
     return "".join(parts)
 
 
-def peer_services(p: Peer, with_cgn: bool) -> str:
+def peer_services(p: Peer, with_cgn: bool, sched: bool = False) -> str:
     title = f"Peer {p.name}" + (" (with a CGN it may sit behind)" if with_cgn else "")
+    peer_volumes = '"./keys:/keys"' + (', "sched:/sched"' if sched else "")
     text = f"""\
   # ---------------------------------------------------------------------------
   # {title}
@@ -193,7 +241,7 @@ def peer_services(p: Peer, with_cgn: bool) -> str:
     environment:
       GATEWAY: {p.router_lan_ip}                   # nat-{p.name}'s LAN address
     # Static Noise keys, made with: docker compose exec peer-{p.name} punch -genkey /keys/{p.name}
-    volumes: ["./keys:/keys"]
+    volumes: [{peer_volumes}]
     networks:
       lan_{p.name}: {{ ipv4_address: {p.peer_ip} }}
     depends_on:

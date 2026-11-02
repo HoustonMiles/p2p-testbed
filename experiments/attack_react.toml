@@ -1,0 +1,62 @@
+# =============================================================================
+# Attack reactive (Experiment C, targeted): does port-hopping escape an
+# attacker that chases the active port?
+#
+# The scripted attacker is an oracle: it is told the victim's active port
+# (the victim writes its receive-port schedule to a shared volume) but can
+# only re-aim after a reaction delay of react_delay_x hop intervals. This
+# upper-bounds any real off-path attacker, which cannot even learn the port
+# (a port-restricted NAT drops its scans).
+#
+# Over a slot of length I the attacker is on the right port for about
+# I - delay, so expected goodput loss ~ max(0, 1 - react_delay_x); once the
+# delay reaches one interval the attacker is always a hop behind and hopping
+# escapes it. Arms: hopping (the subject) and raw (a fixed port: the oracle
+# always lands, the undefended reference). Rate below the link (0.5x) and at
+# it (1x), so this tests precision, not volume.
+#
+#   uv run python -m p2prunner run experiments/attack_react.toml
+#   uv run python -m p2prunner attack results/attack_react/<run>
+# =============================================================================
+
+name = "attack_react"
+description = "Reactive (targeted) flood on peer-a: hopping vs a fixed port, over a sweep of reaction delay."
+trial = "flood"
+runs = 3
+block_size = 3
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 90
+est_trial_s = 45
+victim = "a"
+attack = "reactive"
+hop_interval_ms = 1000
+flood_multiple = 0.5
+react_delay_x = 1
+flood_at = "2s"
+flood_duration = "30s"
+mode = "-direct -hop-interval 1s"
+cmd_a = "punch -name a -room $seed -quiet $mode -pings 5 -ping-interval 100ms -rate-mbit 40 -duration 12s -sample-interval 50ms"
+cmd_b = "punch -name b -room $seed -quiet $mode -pings 5 -ping-interval 100ms -rate-mbit 40 -duration 12s -sample-interval 50ms"
+
+[matrix]
+net_profile = ["coast"]
+uplink_mbit = ["50"]
+downlink_mbit = ["50"]
+react_delay_x = [0, 0.25, 0.5, 1, 2]
+flood_multiple = [0.5, 1]
+
+[[matrix.arm]]
+name = "hopping"
+mode = "-direct -hop-interval 1s"
+
+[[matrix.arm]]
+name = "raw"
+mode = ""
+
+[[matrix.pairing]]
+name = "realistic"
+nat_a = "full_cone"
+nat_b = "port_restricted"

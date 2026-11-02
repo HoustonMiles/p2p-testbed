@@ -33,7 +33,7 @@ class ResultStore:
         self.links_path = run_dir / "links.jsonl"
 
     @classmethod
-    def create(cls, results_root: Path, exp_name: str, experiment_text: str, meta: dict) -> "ResultStore":
+    def create(cls, results_root: Path, exp_name: str, experiment_text: str, meta: dict) -> ResultStore:
         run_dir = results_root / exp_name / time.strftime("%Y%m%d-%H%M%S")
         run_dir.mkdir(parents=True, exist_ok=False)
         (run_dir / "experiment.toml").write_text(experiment_text)

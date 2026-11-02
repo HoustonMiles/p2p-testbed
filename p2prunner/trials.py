@@ -20,6 +20,8 @@ Available types:
   command     run your own command on peer-a and/or peer-b (the hook for the
               Go client); each prints one JSON line of results at the end
   mesh        punch on every peer at once, one full mesh (see mesh.py)
+  flood       run the peers' throughput while the attacker floods the
+              victim's address; score the victim's goodput (Experiment C)
 """
 
 from __future__ import annotations
@@ -134,7 +136,7 @@ class PingPlan:
     warmup: int  # the first replies, discarded (e.g. ARP lookups)
 
     @classmethod
-    def from_params(cls, params: dict) -> "PingPlan":
+    def from_params(cls, params: dict) -> PingPlan:
         return cls(target=params.get("target", STUN_IP), count=int(params.get("count", 50)),
                    interval=float(params.get("interval_s", 0.2)), warmup=int(params.get("warmup", 5)))
 
@@ -244,3 +246,154 @@ def last_json(stdout: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+
+
+# =============================================================================
+# flood: volumetric attack (Experiment C), direct-plain vs direct-hopping
+# =============================================================================
+def flood(tb, cfg, params, ctx) -> dict:
+    """Runs the peers' throughput (cmd_a / cmd_b, like `command`) while the
+    attacker floods the victim, then scores the victim's goodput over the
+    attack window.
+
+    Common params: victim (default a), flood_multiple (offered load as a
+    multiple of the victim's downlink; 0 is the no-attack control),
+    flood_at, flood_duration, timeout_s.
+
+    attack = "volumetric" (default): flood a fixed port (flood_port). The
+    flood fills the downlink before the NAT, so it does not need the right
+    port; hopping cannot escape it.
+
+    attack = "reactive": the scripted attacker, an oracle told the victim's
+    active port but reacting after react_delay_x hop intervals. The victim
+    writes its receive-port schedule to a shared volume and the attacker
+    replays it with that delay. hop_interval_ms sets the interval. Hopping
+    escapes it once react_delay_x >= 1 (the attacker is always a hop behind).
+    """
+    victim = str(params.get("victim", "a"))
+    multiple = float(params.get("flood_multiple", 0))
+    mode = str(params.get("attack", "volumetric"))
+    rate = multiple * victim_downlink(cfg, victim) if multiple > 0 else 0.0
+    at, dur = params.get("flood_at", "2s"), params.get("flood_duration", "20s")
+    timeout = float(params.get("timeout_s", 90))
+
+    # "reactive" delivers over the WAN (through the NAT); "inject" delivers on
+    # the victim's LAN (no NAT in the path), to measure port precision alone.
+    reactive = mode in ("reactive", "inject")
+    target_kind = str(params.get("flood_target", "victim"))   # volumetric: "victim" or "relay"
+    # "attack_target", not "flood_target": the flood result's own "target" field
+    # becomes the flood_target column (the address hit), and would clobber this.
+    metrics: dict = {"victim": victim, "attack": mode, "flood_multiple": multiple, "flood_mbit": round(rate, 3),
+                     "attack_target": target_kind}
+    if reactive and multiple > 0:
+        # Drop any earlier trial's schedule from the shared volume FIRST, so the
+        # attacker (which loads the file as soon as it starts) blocks for this
+        # trial's fresh one instead of replaying stale ports and missing every
+        # hop. Without this, only the first trial on a clean volume can land.
+        tb.sh(f"peer-{victim}", f"rm -f /sched/{victim}.txt")
+        params = {**params, f"cmd_{victim}": params[f"cmd_{victim}"] + f" -hop-schedule-out /sched/{victim}.txt"}
+        delay_ms = float(params.get("react_delay_x", 0)) * float(params["hop_interval_ms"])
+        metrics["react_delay_ms"] = round(delay_ms, 1)
+    jobs = command_jobs(tb, params, ctx)
+    if multiple > 0:
+        if reactive:
+            target = victim_lan_ip(victim) if mode == "inject" else victim_ip(cfg, victim)
+            cmd = (f"flood -target-ip {target} -schedule /sched/{victim}.txt "
+                   f"-react-delay {delay_ms:g}ms -mbit {rate:g} -at {at} -duration {dur}")
+        elif target_kind == "relay":
+            # The relay hides the victim's address, so an attacker that cannot
+            # learn it floods the relay instead; coturn drops the junk on the
+            # uncapped WAN and the victim's link never sees it.
+            cmd = (f"flood -target {relay_target()} "
+                   f"-mbit {rate:g} -at {at} -duration {dur}")
+        else:
+            cmd = (f"flood -target {victim_ip(cfg, victim)}:{int(params.get('flood_port', 40000))} "
+                   f"-mbit {rate:g} -at {at} -duration {dur}")
+        jobs["flood"] = lambda cmd=cmd: tb.sh("attacker", cmd, timeout=timeout)
+
+    results = tb.parallel(jobs, all_at_once=True)
+    ok = True
+    for side in "ab":
+        if side in results:
+            ok = read_side(side, results[side], metrics, ctx.raw) and ok
+    if "flood" in results:
+        ctx.raw["stdout_flood"] = results["flood"].stdout[-5000:]
+        if fj := last_json(results["flood"].stdout):
+            metrics.update({f"flood_{k}": v for k, v in fj.items()})
+        else:
+            ok, metrics["flood_error"] = False, "no JSON from the attacker"
+    metrics.update(attack_goodput(victim, metrics, ctx.raw))
+    if mode == "reactive" and multiple > 0:   # inject bypasses the NAT, so its state is moot
+        metrics.update(victim_nat_state(tb, victim))
+    metrics["ok"] = ok
+    return metrics
+
+
+def victim_nat_state(tb, victim: str) -> dict:
+    """The victim router's cone-filter state after a reactive run, to
+    localize where the attacker's packets died: how many ports its full-cone
+    set currently maps (victim_mapped_ports), and how many inbound packets
+    its cone DNAT rule forwarded over the trial (victim_dnat_pkts). Zero
+    forwarded with the hop ports mapped means the rate cap dropped them;
+    forwarded but not counted at the peer means a counting gap; no ports
+    mapped means the hopper's outbound did not register. Best-effort: a
+    router without these (port-restricted) simply yields no columns."""
+    out: dict = {}
+    try:
+        r = tb.sh(f"nat-{victim}",
+                  "ipset list tb_mapped 2>/dev/null | sed -n '/Members:/,$p' | tail -n +2 | wc -l")
+        if r.returncode == 0 and r.stdout.strip().isdigit():
+            out["victim_mapped_ports"] = int(r.stdout.strip())
+        r = tb.sh(f"nat-{victim}",
+                  "iptables -t nat -L TB_PRE -v -n -x 2>/dev/null | awk '/DNAT/{s+=$1} END{print s+0}'")
+        if r.returncode == 0 and r.stdout.strip().isdigit():
+            out["victim_dnat_pkts"] = int(r.stdout.strip())
+    except Exception:
+        pass   # a diagnostic read must never fail the trial
+    return out
+
+
+def victim_downlink(cfg, victim: str) -> float:
+    """The victim's downlink cap in Mbit/s (per-peer, else testbed-wide). A
+    volumetric flood needs one, so an unset cap is an error."""
+    for key in (f"downlink_mbit_{victim}", "downlink_mbit"):
+        if (v := str(cfg.factors.get(key, "")).strip()):
+            return float(v)
+    raise ValueError("flood trial needs a downlink cap (set downlink_mbit)")
+
+
+def victim_ip(cfg, victim: str) -> str:
+    from p2prunner import topology
+    return topology.peer(victim).public_ip(victim in cfg.cgn_peers)
+
+
+def victim_lan_ip(victim: str) -> str:
+    """The victim's host address on its own LAN, where a co-resident attacker
+    (attack=inject) reaches it with no NAT in the path."""
+    from p2prunner import topology
+    return topology.peer(victim).peer_ip
+
+
+def relay_target() -> str:
+    """The TURN relay's public address and port: what an attacker floods when
+    the relay hides the victim's own address (flood_target=relay)."""
+    from p2prunner import topology
+    return f"{topology.RELAY_IP}:3478"
+
+
+def attack_goodput(victim: str, metrics: dict, raw: dict) -> dict:
+    """The victim's receive goodput before / during / after the attack window,
+    and recovery time, from its rx series and the flood's recorded window."""
+    from p2prunner import goodput
+    start, end = metrics.get("flood_start_unix_ms"), metrics.get("flood_end_unix_ms")
+    if start is None or end is None:
+        return {}
+    row = {"start_unix_ms": metrics.get(f"{victim}_start_unix_ms"),
+           "series_ms": metrics.get(f"{victim}_series_ms"),
+           "rx_series_start_ms": metrics.get(f"{victim}_rx_series_start_ms"),
+           "rx_series_mbit": raw.get(f"{victim}_rx_series_mbit")}
+    points = goodput.timeline(row, "rx")
+    if not points:
+        return {}
+    out = goodput.under_attack(points, row["series_ms"], start, end)
+    return {f"gp_{k}": (round(v, 3) if isinstance(v, float) else v) for k, v in out.items()}

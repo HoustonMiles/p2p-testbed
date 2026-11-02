@@ -71,6 +71,8 @@ before `peers` existed, so older results still match.
 | `relay_detour` | `relay_path` on the coast profile with the relay 0, 10 and 40 ms out of the way (~10 min) |
 | `mesh_scale` | Full mesh of direct links for 2, 4, 8 and 16 peers, all starting at once, realistic (all port-restricted) and mixed NATs (~30 min) |
 | `mesh_join` | Peers joining a running mesh 0, 100, 500 and 2000 ms apart, 8 and 16 peers, realistic and mixed NATs: worst case against best case (~35 min) |
+| `attack_volume` | Experiment C (volumetric): a flood on peer-a at 0, 1x and 2x its downlink, direct-plain vs direct-hopping (~25 min) |
+| `attack_react` | Experiment C (reactive): an oracle attacker chasing peer-a's port with a reaction delay of 0-2 hop intervals, hopping vs a fixed port (~45 min) |
 
 **Trial types:** `nat_verify` (RFC 5780 check), `ping` (RTT from both peers to
 a WAN host), and `command`, which runs `cmd_a`/`cmd_b` on the peers. Each command
@@ -96,6 +98,25 @@ with `-relay` in `args` every pair should come out `relay`),
 and `join_ms_p50` / `join_ms_max` (from a peer's start until its usable
 links with the members already running were ready at both ends). Each link
 end's own row goes to `links.jsonl`.
+
+The `flood` trial runs the peers' throughput (`cmd_a`/`cmd_b`, as in
+`command`) while the `attacker` container (198.18.0.200) floods the victim's
+public address at `flood_multiple` x its downlink (0 is the no-attack
+control), from `flood_at` for `flood_duration`. The downlink cap sits before
+the NAT, so a flood that fills it degrades the victim whatever port it aims
+at. Besides the peers' `a_`/`b_` columns it records the flood window
+(`flood_start_unix_ms`, `flood_end_unix_ms`, `flood_mbit`, ...) and the
+When `attack = reactive`, the attacker is an oracle: the victim writes its
+receive-port schedule (peer `-hop-schedule-out`) to a shared volume and the
+attacker (`flood -schedule -react-delay`) replays it, flooding the port the
+victim used `react_delay_x` hop intervals ago. Otherwise it records the
+victim's goodput over that window (`gp_goodput_before_mbit`,
+`gp_goodput_during_mbit`, `gp_goodput_min_mbit`, `gp_goodput_after_mbit`,
+`gp_recovery_ms`), from its `rx_series_mbit`. The attacker container
+starts automatically for `flood` experiments. A reactive run also records the
+victim router's cone-filter state (`victim_mapped_ports`, `victim_dnat_pkts`)
+to show whether the attacker's packets reached the socket. The `p2prunner attack` report compares
+the arms and multiples.
 
 **How trials are run:**
 - Each configuration's trials are split into blocks (`block_size`), and the
@@ -159,6 +180,12 @@ uv run python -m p2prunner compare results/direct_path/<run> results/relay_detou
 
 # mesh trials: pairs usable, share as predicted, full meshes, time until ready
 uv run python -m p2prunner mesh results/mesh_scale/<run>
+
+# Experiment C (volumetric): victim goodput as the flood grows, per arm and multiple
+uv run python -m p2prunner attack results/attack_volume/<run>
+
+# Experiment C (reactive): the attacker's hit-rate on the live socket vs reaction delay
+uv run python -m p2prunner hits results/attack_react/<run>
 ```
 
 `compare` counts a trial when its path was up: both sides punched (and

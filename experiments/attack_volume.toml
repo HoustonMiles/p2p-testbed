@@ -1,0 +1,60 @@
+# =============================================================================
+# Attack volume (Experiment C, volumetric): can a flood that fills the
+# victim's access link stop the session, and does port-hopping help?
+#
+# The attacker (198.18.0.200) floods peer-a's public address while a and b
+# run their throughput test. The downlink cap is applied before the NAT, so
+# a flood fills the link whatever the port it aims at: port-hopping cannot
+# escape it (only hiding the address, via the relay, can -- a later arm).
+#
+# Arms (direct_mode): plain (Noise, no hopping) and hopping. For each,
+# flood_multiple 0 (control), 1x and 2x the 50 Mbit/s downlink.
+#
+# Victim goodput columns (gp_*): goodput before / during / min / after the
+# attack, and recovery time, from a's rx series and the flood's window.
+# With the flood spanning the throughput, the control (0x) is the baseline
+# to compare the 1x / 2x during-goodput against.
+#
+#   uv run python -m p2prunner plan experiments/attack_volume.toml
+#   uv run python -m p2prunner run  experiments/attack_volume.toml
+# =============================================================================
+
+name = "attack_volume"
+description = "Volumetric flood on peer-a: direct-plain vs direct-hopping, 0/1x/2x the downlink."
+trial = "flood"
+runs = 5
+block_size = 5
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 90
+est_trial_s = 45
+victim = "a"
+flood_multiple = 0
+direct_mode = "-direct -hop-interval 1s"
+flood_port = 40000
+flood_at = "2s"
+flood_duration = "30s"
+# Both peers: a long throughput so the flood overlaps it; few pings to start it sooner.
+cmd_a = "punch -name a -room $seed -quiet $direct_mode -pings 5 -ping-interval 100ms -rate-mbit 40 -duration 12s -sample-interval 50ms"
+cmd_b = "punch -name b -room $seed -quiet $direct_mode -pings 5 -ping-interval 100ms -rate-mbit 40 -duration 12s -sample-interval 50ms"
+
+[matrix]
+net_profile = ["coast"]
+uplink_mbit = ["50"]
+downlink_mbit = ["50"]
+flood_multiple = [0, 1, 2]
+
+[[matrix.direct_mode]]
+name = "plain"
+direct_mode = "-direct -hop-interval 1s -hop-force"
+
+[[matrix.direct_mode]]
+name = "hopping"
+direct_mode = "-direct -hop-interval 1s"
+
+[[matrix.pairing]]
+name = "realistic"
+nat_a = "port_restricted"
+nat_b = "port_restricted"

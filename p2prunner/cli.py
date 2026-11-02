@@ -51,15 +51,15 @@ from p2prunner import experiment as experiment_mod
 from p2prunner.mesh import mesh
 from p2prunner.store import ResultStore
 from p2prunner.testbed import Testbed, TestbedError
-from p2prunner.trials import TrialContext, command, nat_verify, ping
+from p2prunner.trials import TrialContext, command, flood, nat_verify, ping
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Trial types by name (see trials.py and mesh.py).
-TRIALS = {"nat_verify": nat_verify, "ping": ping, "command": command, "mesh": mesh}
+TRIALS = {"nat_verify": nat_verify, "ping": ping, "command": command, "mesh": mesh, "flood": flood}
 
 # Rough seconds per trial, for `plan` estimates only.
-EST_TRIAL_S = {"nat_verify": 12, "ping": None, "command": None}
+EST_TRIAL_S = {"nat_verify": 12, "ping": None, "command": None, "flood": None}
 EST_CONFIG_START_S = 10      # docker compose up --wait --force-recreate
 EST_VERIFY_S = 12            # RFC 5780 check at each configuration start
 
@@ -138,8 +138,25 @@ class Run:
     started: float = field(default_factory=time.monotonic)
 
 
+def rebuild_images(tb, args) -> bool:
+    """Rebuild the testbed images unless --no-build. Docker caches unchanged
+    layers, so this is a quick no-op when nothing changed, but it stops a Go
+    or Dockerfile edit from silently running against a stale image (the up
+    path does not --build). Returns False only on a real build failure."""
+    if getattr(args, "no_build", False):
+        return True
+    print("Building testbed images (docker compose build; cached if unchanged)...")
+    result = tb.build()
+    if result.returncode != 0:
+        print("build failed:\n" + result.stderr[-2000:])
+        return False
+    return True
+
+
 def cmd_run(args) -> int:
     tb = Testbed(REPO_ROOT)
+    if not rebuild_images(tb, args):
+        return 1
     opened = resume_run(args) if args.resume else new_run(args, tb)
     if opened is None:
         return 2
@@ -342,14 +359,17 @@ def cmd_verify(args) -> int:
 
 
 def cmd_compose(args) -> int:
-    print(compose_file.render(args.peers, cgn_names(args.cgn)), end="")
+    print(compose_file.render(args.peers, cgn_names(args.cgn), attacker=args.attacker or bool(args.lan_attacker),
+                              lan_attacker=args.lan_attacker), end="")
     return 0
 
 
 def cmd_up(args) -> int:
     tb = Testbed(REPO_ROOT)
+    if not rebuild_images(tb, args):
+        return 1
     try:
-        tb.use_stack(args.peers, cgn_names(args.cgn))
+        tb.use_stack(args.peers, cgn_names(args.cgn), args.attacker or bool(args.lan_attacker), args.lan_attacker)
     except TestbedError as e:
         print(e)
         return 1
@@ -378,6 +398,14 @@ def cmd_compare(args) -> int:
 
 def cmd_mesh(args) -> int:
     return reports.mesh(args.runs)
+
+
+def cmd_attack(args) -> int:
+    return reports.attack(args.runs)
+
+
+def cmd_hits(args) -> int:
+    return reports.hits(args.runs)
 
 
 # =============================================================================
@@ -410,6 +438,8 @@ def add_experiment_commands(sub) -> None:
     r.add_argument("--runs", type=int, help="override runs per configuration (e.g. a quick test)")
     r.add_argument("--resume", metavar="RESULTS_DIR", help="continue an interrupted run")
     r.add_argument("--results", default="results", help="results folder (default: results/)")
+    r.add_argument("--no-build", action="store_true",
+                   help="skip the image rebuild (faster, but a code edit then runs against a stale image)")
     r.set_defaults(func=cmd_run)
 
 
@@ -428,6 +458,13 @@ def add_testbed_commands(sub) -> None:
         u.add_argument("--peers", type=int, default=2, help="how many peers (default 2)")
         u.add_argument("--cgn", default="", metavar="NAMES",
                        help="peers that get a CGN to sit behind, e.g. b,d (then NAT_B_UPSTREAM=cgnat)")
+        u.add_argument("--attacker", action="store_true",
+                       help="also start the static attacker container (Experiment C)")
+        u.add_argument("--lan-attacker", default=None, metavar="PEER",
+                       help="also place the attacker on PEER's LAN, to flood it directly (targeted injection)")
+        if name == "up":
+            u.add_argument("--no-build", action="store_true",
+                           help="skip the image rebuild (faster, but a code edit then runs against a stale image)")
         u.set_defaults(func=func)
     d = sub.add_parser("down", help="stop the testbed and go back to the committed two-peer stack")
     d.set_defaults(func=cmd_down)
@@ -450,4 +487,14 @@ def add_report_commands(sub) -> None:
     m.add_argument("runs", nargs="+", metavar="RUN",
                    help="results folder; later folders replace the configurations they rerun")
     m.set_defaults(func=cmd_mesh)
+
+    a = sub.add_parser("attack", help="Experiment C (volumetric): victim goodput as the flood grows")
+    a.add_argument("runs", nargs="+", metavar="RUN",
+                   help="results folder; later folders replace the configurations they rerun")
+    a.set_defaults(func=cmd_attack)
+
+    ht = sub.add_parser("hits", help="Experiment C (reactive): how often the attacker reached a live hop socket")
+    ht.add_argument("runs", nargs="+", metavar="RUN",
+                    help="results folder; later folders replace the configurations they rerun")
+    ht.set_defaults(func=cmd_hits)
 

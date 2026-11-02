@@ -48,6 +48,11 @@ type PeerResult struct {
 
 	StartUnixMs float64 `json:"start_unix_ms"` // when the run began: puts every member's *_ms on one timeline
 	TotalMs     float64 `json:"total_ms"`
+
+	// Packets on the punched socket that named no member of our room: stray or
+	// injected. In raw/relay mode (no hopper) this is where a targeted flood
+	// lands, so it is the plain-socket counterpart of hop_unrouted.
+	StrayPackets uint64 `json:"rx_stray"`
 }
 
 // LinkResult is what this peer measured on one link.

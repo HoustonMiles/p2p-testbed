@@ -34,6 +34,28 @@ class ComposeTest(unittest.TestCase):
         self.assertIn("DEFAULT_NET_PROFILE: ${NET_PROFILE:-local}", text)
         self.assertNotIn("CGN_C_TYPE", text)  # no CGN for c
 
+    def test_attacker_only_when_asked(self):
+        self.assertNotIn("  attacker:", compose.render(2))
+        text = compose.render(2, attacker=True)
+        self.assertEqual(services(text)[-1], "attacker")
+        self.assertIn("198.18.0.200", text)
+
+    def test_lan_attacker_joins_the_victims_lan(self):
+        self.assertNotIn("10.200.1.200", compose.render(2, attacker=True))  # WAN-only by default
+        # the attacker's own service block, up to the top-level networks: section
+        atk = compose.render(2, attacker=True, lan_attacker="a").split("  attacker:", 1)[1].split("\nnetworks:\n", 1)[0]
+        self.assertIn("wan: { ipv4_address: 198.18.0.200 }", atk)
+        self.assertIn("lan_a: { ipv4_address: 10.200.1.200 }", atk)   # also on peer-a's LAN
+
+    def test_lan_attacker_needs_the_attacker_and_a_real_peer(self):
+        with self.assertRaises(ValueError):
+            compose.render(2, lan_attacker="a")                 # no attacker container
+        with self.assertRaises(ValueError):
+            compose.render(2, attacker=True, lan_attacker="c")  # peer not in the testbed
+
+    def test_default_is_unchanged_by_the_lan_option(self):
+        self.assertNotIn("10.200.1.200", compose.render(2, {"a", "b"}))  # baseline stays byte-identical
+
     def test_unknown_cgn_peer(self):
         with self.assertRaises(ValueError):
             compose.render(2, {"c"})

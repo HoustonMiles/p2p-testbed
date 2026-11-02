@@ -182,3 +182,124 @@ class MeshReportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AttackReportTest(unittest.TestCase):
+    """Experiment C volumetric: the victim's goodput as the flood grows,
+    the arm (plain/hopping) and the multiple shown per row."""
+
+    def setUp(self):
+        self.folders = ResultFolders()
+
+    def tearDown(self):
+        self.folders.cleanup()
+
+    def row(self, cid, arm, mult, during, rx_mbit):
+        return trial(cid, direct_mode=arm, flood_multiple=mult, flood_mbit=mult * 50.0,
+                     gp_goodput_before_mbit=40.0, gp_goodput_during_mbit=during,
+                     gp_goodput_min_mbit=during, gp_goodput_after_mbit=40.0,
+                     a_rx_mbit=rx_mbit, a_rx_loss=round(1 - rx_mbit / 40, 3))
+
+    def test_arm_and_multiple_distinguish_rows(self):
+        run = self.folders.write("attack_volume", [
+            self.row("c00-aaa", "plain", 0, 40.0, 40.0),
+            self.row("c04-bbb", "plain", 2, 2.0, 8.0),
+            self.row("c05-ccc", "hopping", 2, 3.0, 9.0),
+        ])
+        out = report(reports.attack, [run])
+        self.assertIn("plain", out)
+        self.assertIn("hopping", out)
+        # The control keeps its goodput; both 2x arms collapse (hopping no better).
+        lines = [ln for ln in out.splitlines() if "coast" in ln]
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(any("40.00" in ln and "plain" in ln and " 0.000 " in ln for ln in lines))
+
+    def test_relay_flood_arm_is_marked(self):
+        # Two relayed arms share the mode string; the one flooding the relay
+        # (victim hidden) is marked so it reads apart from the exposed one.
+        hidden = trial("c07-hid", direct_mode="-relay -direct", attack_target="relay",
+                       flood_multiple=2, flood_mbit=100.0, gp_goodput_during_mbit=39.8,
+                       gp_goodput_min_mbit=39.0, a_rx_mbit=39.8, a_rx_loss=0.003)
+        exposed = trial("c08-exp", direct_mode="-relay -direct", attack_target="victim",
+                        flood_multiple=2, flood_mbit=100.0, gp_goodput_during_mbit=31.5,
+                        gp_goodput_min_mbit=12.0, a_rx_mbit=32.0, a_rx_loss=0.18)
+        out = report(reports.attack, [self.folders.write("attack_relay", [hidden, exposed])])
+        marked = [ln for ln in out.splitlines() if "floods the relay" in ln]
+        self.assertEqual(len(marked), 1)              # only the hidden arm is marked
+        self.assertIn("39.8", marked[0])              # and it keeps its goodput
+
+
+class AttackReactiveReportTest(unittest.TestCase):
+    """The reactive experiment uses the `arm` bundle and sweeps react_delay_x;
+    the report shows the arm and the delay column."""
+
+    def setUp(self):
+        self.folders = ResultFolders()
+
+    def tearDown(self):
+        self.folders.cleanup()
+
+    def row(self, cid, arm, delay, during):
+        return trial(cid, arm=arm, react_delay_x=delay, flood_multiple=0.5, flood_mbit=25.0,
+                     gp_goodput_before_mbit=40.0, gp_goodput_during_mbit=during,
+                     gp_goodput_min_mbit=during, gp_goodput_after_mbit=40.0,
+                     a_rx_mbit=during, a_rx_loss=round(1 - during / 40, 3))
+
+    def test_shows_arm_and_delay(self):
+        run = self.folders.write("attack_react", [
+            self.row("c00-aaa", "hopping", 0.0, 2.0),    # attacker keeps up: goodput sinks
+            self.row("c01-bbb", "hopping", 1.0, 39.0),   # a hop behind: goodput preserved
+            self.row("c02-ccc", "raw", 0.0, 2.0),        # fixed port: always hit
+        ])
+        out = report(reports.attack, [run])
+        self.assertIn("delay", out.splitlines()[0])      # the new column
+        self.assertIn("hopping", out)
+        self.assertIn("raw", out)
+        # the hopping row at delay 1.0 keeps most goodput; at delay 0 it does not
+        kept = [ln for ln in out.splitlines() if "hopping" in ln and "39." in ln]
+        self.assertEqual(len(kept), 1)
+
+
+class HitsReportTest(unittest.TestCase):
+    """Reactive hit-rate: attacker packets reaching a live hop socket
+    (hop_unrouted + hop_foreign) fall as the reaction delay grows, which the
+    goodput column does not show."""
+
+    def setUp(self):
+        self.folders = ResultFolders()
+
+    def tearDown(self):
+        self.folders.cleanup()
+
+    def row(self, cid, delay, unrouted, during):
+        return trial(cid, arm="hopping", react_delay_x=delay, flood_multiple=1.0,
+                     flood_packets=100000, a_hop_unrouted=unrouted, a_hop_foreign=0,
+                     gp_goodput_during_mbit=during)
+
+    def test_hit_rate_falls_with_delay(self):
+        run = self.folders.write("attack_react", [
+            self.row("c00-aaa", 0.0, 40000, 34.0),   # keeps up: many hits
+            self.row("c01-bbb", 1.0, 2000, 34.0),    # a hop behind: few hits
+        ])
+        out = report(reports.hits, [run])
+        self.assertIn("hit_rate", out.splitlines()[0])
+        d0 = next(ln for ln in out.splitlines() if "40000.00" in ln)   # delay 0
+        d1 = next(ln for ln in out.splitlines() if "2000.00" in ln)    # delay 1
+        self.assertIn("0.400", d0)   # high hit-rate when the attacker keeps up
+        self.assertIn("0.020", d1)   # near zero when a hop behind
+        self.assertIn("34.00", d0)   # goodput is the same either way (link-bound)
+        self.assertIn("34.00", d1)
+
+    def test_raw_fixed_port_hits_are_counted_via_rx_stray(self):
+        # The raw arm has no hopper, so its injected packets land on the one
+        # fixed socket and are counted as rx_stray; the report must include it.
+        run = self.folders.write("attack_inject_lan", [
+            self.row("c00-aaa", 0.0, 40000, 34.0),   # hopping
+            trial("c09-raw", arm="raw", react_delay_x=0.0, flood_multiple=1.0,
+                  flood_packets=100000, a_rx_stray=95000, gp_goodput_during_mbit=34.0),
+        ])
+        out = report(reports.hits, [run])
+        self.assertIn("hopping", out)
+        raw = next(ln for ln in out.splitlines() if "raw" in ln)
+        self.assertIn("95000.00", raw)   # the fixed-port flood lands (rx_stray)
+        self.assertIn("0.950", raw)      # ~every packet hits the static port

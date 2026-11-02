@@ -40,6 +40,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"p2ptestbed/p2p/internal/direct"
@@ -75,6 +76,8 @@ type Config struct {
 	Drain    time.Duration // wait for queued packets after each direction
 
 	SampleInterval time.Duration // throughput rate over time in intervals this long; 0: off
+
+	HopScheduleOut string // write the receive-port schedule here for the reactive attacker (testbed); "" off
 
 	Linger time.Duration // keep answering the members this long before exiting
 
@@ -130,6 +133,8 @@ type runner struct {
 	id   uint64
 	res  PeerResult
 
+	stray atomic.Uint64 // packets on the punched socket that named no member: stray or injected (raw/relay mode's hop_unrouted)
+
 	stunTx  stun.TxID
 	stunGot netip.AddrPort
 	rdv     *rendezvous.Client
@@ -151,6 +156,7 @@ func Run(cfg Config) ([]*Result, error) {
 	r := newRunner(cfg)
 	err := r.run()
 	r.res.TotalMs = ms(time.Since(r.t0))
+	r.res.StrayPackets = r.stray.Load()
 	return r.rows(err), err
 }
 
@@ -208,6 +214,9 @@ func (r *runner) run() error {
 	}
 	if err := r.meet(); err != nil {
 		return err
+	}
+	if r.cfg.Direct == nil && r.cfg.Relay == nil {
+		r.writeScheduleOut(r.rawScheduleLine())
 	}
 	r.runTests()
 	r.linger()

@@ -1,0 +1,65 @@
+# =============================================================================
+# Attack inject (Experiment C, targeted injection): does port-hopping keep a
+# reactive attacker off the victim's live socket, when the flood is BELOW the
+# link so the access link is not the bottleneck?
+#
+# The earlier reactive run flooded at and above the link rate, so the pre-NAT
+# downlink cap was congested and dropped the attacker's packets before the
+# NAT could forward them (victim_dnat_pkts ~= 1 with ~30 ports mapped). Here
+# the victim is full-cone (its NAT forwards unsolicited packets to a mapped
+# port) and the flood is well below the link, so injection -- not bandwidth
+# -- is the variable. The oracle attacker aims at the port the victim used
+# react_delay_x hop intervals ago.
+#
+# Read with `p2prunner hits`: reached = attacker packets that hit a live hop
+# socket (hop_unrouted + hop_foreign + hop_auth_failed). If hopping works,
+# reached falls toward zero as react_delay_x passes 1 (the attacker is a hop
+# behind); the raw arm (fixed port) stays high. victim_dnat_pkts should now
+# be large, confirming the flood reached the NAT.
+#
+#   uv run python -m p2prunner run  experiments/attack_inject.toml
+#   uv run python -m p2prunner hits results/attack_inject/<run>
+# =============================================================================
+
+name = "attack_inject"
+description = "Targeted injection on a full-cone peer-a, flood below the link: hopping vs a fixed port over a reaction-delay sweep."
+trial = "flood"
+runs = 3
+block_size = 3
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 90
+est_trial_s = 45
+victim = "a"
+attack = "reactive"
+hop_interval_ms = 1000
+flood_multiple = 0.3
+react_delay_x = 1
+flood_at = "2s"
+flood_duration = "30s"
+mode = "-direct -hop-interval 1s"
+# Legit load 20 Mbit/s, flood 0.3 x 50 = 15 Mbit/s: 35 < 50, so the link is
+# never the bottleneck and the cap does not drop the attacker.
+cmd_a = "punch -name a -room $seed -quiet $mode -pings 5 -ping-interval 100ms -rate-mbit 20 -duration 12s -sample-interval 50ms"
+cmd_b = "punch -name b -room $seed -quiet $mode -pings 5 -ping-interval 100ms -rate-mbit 20 -duration 12s -sample-interval 50ms"
+
+[matrix]
+net_profile = ["coast"]
+uplink_mbit = ["50"]
+downlink_mbit = ["50"]
+react_delay_x = [0, 0.25, 0.5, 1, 2]
+
+[[matrix.arm]]
+name = "hopping"
+mode = "-direct -hop-interval 1s"
+
+[[matrix.arm]]
+name = "raw"
+mode = ""
+
+[[matrix.pairing]]
+name = "fullcone_victim"
+nat_a = "full_cone"
+nat_b = "port_restricted"

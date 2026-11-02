@@ -1,0 +1,74 @@
+# =============================================================================
+# Attack relay (Experiment C, volumetric): does the relay defend goodput that
+# port-hopping cannot, and what is its limit?
+#
+# The volumetric result is that a flood on the victim's access link fills it
+# whatever the port, so hopping does not help (attack_volume). The relay's
+# defence is different: it HIDES the victim's address, so an attacker that
+# cannot learn it has nothing on the victim's link to aim at. This experiment
+# makes that concrete with three arms, all flooded at 0 / 1x / 2x the 50 Mbit/s
+# downlink while a and b run their throughput:
+#
+#   direct         hopping direct channel; the attacker floods peer-a's public
+#                  address (exposed in direct mode) -> fills the link.
+#   relay-hidden   relayed (Noise through coturn); the victim's address is
+#                  hidden, so the attacker can only flood the RELAY -> coturn
+#                  drops the junk on the uncapped WAN and the victim's link is
+#                  untouched -> goodput preserved.
+#   relay-exposed  relayed, but the attacker somehow knows peer-a's address and
+#                  floods it anyway -> the link fills regardless of the relay.
+#                  The relay's limit: it helps only while the address stays hidden.
+#
+# So expect during-goodput to collapse for direct and relay-exposed, and hold
+# for relay-hidden. Read with `p2prunner attack`.
+#
+#   uv run python -m p2prunner run  experiments/attack_relay.toml
+#   uv run python -m p2prunner attack results/attack_relay/<run>
+# =============================================================================
+
+name = "attack_relay"
+description = "Volumetric flood: direct vs relayed (victim hidden) vs relayed (victim exposed), 0/1x/2x the downlink."
+trial = "flood"
+runs = 3
+block_size = 3
+seed = 1
+verify_nat = true
+
+[params]
+timeout_s = 90
+est_trial_s = 45
+victim = "a"
+flood_multiple = 0
+flood_target = "victim"
+direct_mode = "-direct -hop-interval 1s"
+flood_port = 40000
+flood_at = "2s"
+flood_duration = "30s"
+cmd_a = "punch -name a -room $seed -quiet $direct_mode -pings 5 -ping-interval 100ms -rate-mbit 40 -duration 12s -sample-interval 50ms"
+cmd_b = "punch -name b -room $seed -quiet $direct_mode -pings 5 -ping-interval 100ms -rate-mbit 40 -duration 12s -sample-interval 50ms"
+
+[matrix]
+net_profile = ["coast"]
+uplink_mbit = ["50"]
+downlink_mbit = ["50"]
+flood_multiple = [0, 1, 2]
+
+[[matrix.direct_mode]]
+name = "direct"
+direct_mode = "-direct -hop-interval 1s"
+flood_target = "victim"
+
+[[matrix.direct_mode]]
+name = "relay-hidden"
+direct_mode = "-relay -direct"
+flood_target = "relay"
+
+[[matrix.direct_mode]]
+name = "relay-exposed"
+direct_mode = "-relay -direct"
+flood_target = "victim"
+
+[[matrix.pairing]]
+name = "realistic"
+nat_a = "port_restricted"
+nat_b = "port_restricted"

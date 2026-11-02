@@ -16,7 +16,8 @@ COPY p2p/ ./
 RUN CGO_ENABLED=0 go vet ./... \
  && CGO_ENABLED=0 go test ./... \
  && CGO_ENABLED=0 go build -trimpath -o /out/punch ./cmd/punch \
- && CGO_ENABLED=0 go build -trimpath -o /out/rendezvous ./cmd/rendezvous
+ && CGO_ENABLED=0 go build -trimpath -o /out/rendezvous ./cmd/rendezvous \
+ && CGO_ENABLED=0 go build -trimpath -o /out/flood ./cmd/flood
 
 # --- Stage 2: the runtime image ----------------------------------------------
 FROM alpine:3.20
@@ -27,8 +28,9 @@ FROM alpine:3.20
 #            turnutils_natdiscovery (RFC 5780 NAT behaviour discovery)
 RUN apk add --no-cache bash coturn iproute2 iputils socat tcpdump
 
-# The raw UDP hole-punching baseline (peers) and its rendezvous server.
-COPY --from=gobuild /out/punch /out/rendezvous /usr/local/bin/
+# The raw UDP hole-punching baseline (peers), its rendezvous server, and
+# the static attacker for Experiment C.
+COPY --from=gobuild /out/punch /out/rendezvous /out/flood /usr/local/bin/
 
 COPY testbed/host/configure-host.sh /usr/local/bin/configure-host.sh
 RUN chmod +x /usr/local/bin/configure-host.sh
